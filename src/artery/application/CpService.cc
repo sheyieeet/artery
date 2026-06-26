@@ -203,9 +203,108 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
 
     Asn1PacketVisitor<Cpm> visitor;
     const Cpm* cpm = boost::apply_visitor(visitor, *packet);
+    
+    // receive CPM
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper;
         emit(scSignalCpmReceived, &obj);
+
+        // only run merging at RSU
+        if (mVehicleDataProvider->getStationType() != vanetza::geonet::StationType::RSU) {
+            return; 
+        }
+
+        omnetpp::SimTime t_now = simTime();
+        
+        uint32_t senderVehicleId = cpm->header.stationId;
+
+        // Discard from active list
+        for (auto it = mGlobalObstaclesList.begin(); it != mGlobalObstaclesList.end(); ) {
+            omnetpp::SimTime t_last = it->second.lastUpdateTime;
+            if ((t_now - t_last).doubleValue() >= 1.0) {
+                it = mGlobalObstaclesList.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        
+        // search CPM, PerceivedObjectContainer, add to list
+        for (const auto& container : cpm->payload.cpmContainers.list) {
+            if (container->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
+                auto& poc = container->containerData.choice.PerceivedObjectContainer;
+                
+                // all objects in cpm
+                for (size_t i = 0; i < poc.perceivedObjects.list.count; ++i) {
+                    auto* po = poc.perceivedObjects.list.array[i];
+                    
+                    long objId = 0;
+                    if (po->objectId) {
+                        objId = *(po->objectId); 
+                    }
+                    
+                    // position of source station(vehicle)
+                    auto traci = this->getMiddleware().getTraCICommandInterface();
+                    auto senderVehicle = traci->vehicle(std::to_string(senderVehicleId));
+                    veins::Coord senderRealPos = senderVehicle.getPosition(); // (X,Y) of the vehicle
+
+                    // relative coordinates
+                    double relX = po->position.xCoordinate.value / 100.0;
+                    double relY = po->position.yCoordinate.value / 100.0;
+
+                    // 3. translate to global
+                    double globalX = senderRealPos.x + relX;
+                    double globalY = senderRealPos.y + relY;
+
+                    if (mGlobalObstaclesList.find(objId) == mGlobalObstaclesList.end()) {
+                        // empty list or new object -> (O_t = O_t-1 + CPM)
+                        RsuTrackedObstacle newObs;
+                        newObs.id = objId;
+                        newObs.x = globalX;
+                        newObs.y = globalY;
+                        newObs.lastUpdateTime = t_now;
+                        mGlobalObstaclesList[objId] = newObs;
+                    } else {
+                        // existing object, update
+                        mGlobalObstaclesList[objId].x = globalX;
+                        mGlobalObstaclesList[objId].y = globalY;
+                        mGlobalObstaclesList[objId].lastUpdateTime = t_now;
+                    }
+                }
+            }
+        }
+
+        // merging instances of objects (threshold = 0.15m)
+        const double lidar_error_margin = 0.15;
+        for (auto it1 = mGlobalObstaclesList.begin(); it1 != mGlobalObstaclesList.end(); ++it1) {
+            auto it2 = it1;
+            for (++it2; it2 != mGlobalObstaclesList.end(); ) {
+                double dx = it1->second.x - it2->second.x;
+                double dy = it1->second.y - it2->second.y;
+                double distance = std::sqrt(dx*dx + dy*dy);
+
+                if (distance <= lidar_error_margin) {
+                    if (it2->second.lastUpdateTime > it1->second.lastUpdateTime) {
+                        it1->second.x = it2->second.x;
+                        it1->second.y = it2->second.y;
+                        it1->second.lastUpdateTime = it2->second.lastUpdateTime;
+                    }
+                    it2 = mGlobalObstaclesList.erase(it2); 
+                } else {
+                    ++it2;
+                }
+            }
+        }
+
+        // Reliability Ratio
+        double t_max = 1.0; // max lifespan = 1 s
+        for (auto& pair : mGlobalObstaclesList) {
+            double t_elapsed = (t_now - pair.second.lastUpdateTime).doubleValue();
+            pair.second.reliabilityRatio = (t_max - t_elapsed) / t_max;
+            if (pair.second.reliabilityRatio < 0.0) pair.second.reliabilityRatio = 0.0;
+        }
+
+        // TODO: fix downlink selection logic
+        SendSelectedLink(senderVehicleId, ind);
     }
 }
 
@@ -290,6 +389,82 @@ void CpService::sendCpm(const SimTime& T_now)
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
     payload->layer(OsiLayer::Application) = std::move(buffer);
+    this->request(request, std::move(payload));
+}
+void CpService::SendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind)
+{
+    omnetpp::SimTime t_now = simTime();
+    
+    Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, countTaiMilliseconds(mTimer->getTime()));
+    addOriginatingRsuContainer(responseCpm);
+
+    std::vector<CpService::PerceivedObjectSnapshot> selectedSnapshots;
+    std::vector<std::size_t> selectedIndices;
+
+    // RSU global coordinates
+    double rsuGlobalX = mVehicleDataProvider->position().x;
+    double rsuGlobalY = mVehicleDataProvider->position().y;
+
+    // vehicle's global coordinates
+    auto traci = this->getMiddleware().getTraCICommandInterface();
+    veins::Coord targetVehiclePos = traci->vehicle(std::to_string(targetVehicleId)).getPosition();
+
+    size_t localIndex = 0;
+    
+    for (const auto& pair : mGlobalObstaclesList) {
+        const auto& obstacle = pair.second;
+
+        double distX = obstacle.x - targetVehiclePos.x;
+        double distY = obstacle.y - targetVehiclePos.y;
+        double distToTarget = std::sqrt(distX * distX + distY * distY);
+
+        // TODO: modify inclusion rule
+        if (distToTarget <= 50.0 && obstacle.reliabilityRatio > 0.5) {
+            
+            CpService::PerceivedObjectSnapshot snap;
+            snap.cpsId = obstacle.id;
+            
+            
+            double relToRsuX = obstacle.x - rsuGlobalX;
+            double relToRsuY = obstacle.y - rsuGlobalY;
+
+
+            snap.xCm = std::round(relToRsuX * 100.0); 
+            snap.yCm = std::round(relToRsuY * 100.0);
+            
+            snap.objectAgeMs = (t_now - obstacle.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
+            snap.objectPerceptionQuality = std::clamp(static_cast<long>(obstacle.reliabilityRatio * 7), 1L, 7L);
+            snap.hasVelocity = false; 
+
+            selectedSnapshots.push_back(snap);
+            selectedIndices.push_back(localIndex++);
+        }
+    }
+
+    // add snapshot to ASN.1 PerceivedObjectContainer
+    if (!selectedSnapshots.empty()) {
+        addPerceivedObjectContainer(responseCpm, selectedSnapshots, selectedIndices, mLastCpmTimestamp);
+    }
+
+    // geounicast
+    using namespace vanetza;
+    btp::DataRequestB request;
+    request.destination_port = btp::ports::CPM;
+    request.gn.its_aid = aid::CP;
+    request.gn.transport_type = geonet::TransportType::GeoUnicast;
+    
+    request.gn.destination_address = ind.source_address; 
+    request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
+    request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
+
+    // send packet through middleware
+    CpObject obj(std::move(responseCpm));
+    emit(scSignalCpmSent, &obj);
+
+    std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
+    std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
+    payload->layer(OsiLayer::Application) = std::move(buffer);
+    
     this->request(request, std::move(payload));
 }
 

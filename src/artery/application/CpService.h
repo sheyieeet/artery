@@ -107,8 +107,19 @@ public:
     void trigger() override;
 
 private:
+
+    struct RsuTrackedObstacle {
+        long id;
+        double x;
+        double y;
+        omnetpp::SimTime lastUpdateTime;
+        double reliabilityRatio = 1.0;
+    };
+    std::unordered_map<long, RsuTrackedObstacle> mGlobalObstaclesList;
+    
     void checkTriggeringConditions(const omnetpp::SimTime& T_now);
     void sendCpm(const omnetpp::SimTime& T_now);
+    void sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind);
     void captureVdpSnapshot();
     void captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors);
     ObjectVdpSnapshotMap captureObjectVdpSnapshot(const LocalEnvironmentModel::TrackedObjects& objects) const;
