@@ -108,13 +108,15 @@ public:
 
 private:
 
-    struct RsuTrackedObstacle {
-        long id;
-        double x;
-        double y;
-        omnetpp::SimTime lastUpdateTime;
-        double reliabilityRatio = 1.0;
-    };
+	struct RsuTrackedObstacle {
+		 long id;                        
+		 double x;                       
+		 double y;
+		 double speed;          
+		 double heading;        
+		 omnetpp::SimTime lastUpdateTime; 
+		 double reliabilityRatio = 1.0;  
+	};
     std::unordered_map<long, RsuTrackedObstacle> mGlobalObstaclesList;
     
     void checkTriggeringConditions(const omnetpp::SimTime& T_now);

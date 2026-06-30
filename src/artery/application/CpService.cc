@@ -206,7 +206,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
     
     // receive CPM
     if (cpm && cpm->validate()) {
-        CpObject obj = visitor.shared_wrapper;
+        CpObject obj = visitor.shared_wrapper; 
         emit(scSignalCpmReceived, &obj);
 
         // only run merging at RSU
@@ -217,7 +217,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         omnetpp::SimTime t_now = simTime();
         
         uint32_t senderVehicleId = cpm->header.stationId;
-
+        
         // Discard from active list
         for (auto it = mGlobalObstaclesList.begin(); it != mGlobalObstaclesList.end(); ) {
             omnetpp::SimTime t_last = it->second.lastUpdateTime;
@@ -242,6 +242,18 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                         objId = *(po->objectId); 
                     }
                     
+                    // speed and heading
+                    double obsSpeed = 0.0;
+					double obsHeading = 0.0;
+					if (po->velocity != nullptr) {
+						 // speed (m/s)
+						 obsSpeed = po->velocity->choice.polarVelocity.velocityMagnitude.speedValue / 100.0;
+						 // heading (degree)
+						 obsHeading = po->velocity->choice.polarVelocity.velocityDirection.value / 10.0;
+					} 
+					newObs.speed = obsSpeed;
+					newObs.heading = obsHeading;
+					
                     // position of source station(vehicle)
                     auto traci = this->getMiddleware().getTraCICommandInterface();
                     auto senderVehicle = traci->vehicle(std::to_string(senderVehicleId));
@@ -251,7 +263,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                     double relX = po->position.xCoordinate.value / 100.0;
                     double relY = po->position.yCoordinate.value / 100.0;
 
-                    // 3. translate to global
+                    // translate to global
                     double globalX = senderRealPos.x + relX;
                     double globalY = senderRealPos.y + relY;
 
@@ -391,81 +403,132 @@ void CpService::sendCpm(const SimTime& T_now)
     payload->layer(OsiLayer::Application) = std::move(buffer);
     this->request(request, std::move(payload));
 }
+
+// This is the custom function to filter and send cpm to selected downlink using custom inclusion rule in this research
+// The objects go through a selection process, and finally some will be included in the cpms for some vehicle 
 void CpService::SendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind)
 {
     omnetpp::SimTime t_now = simTime();
     
-    Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, countTaiMilliseconds(mTimer->getTime()));
-    addOriginatingRsuContainer(responseCpm);
+    // hyperparameters
+    const double tau = 0.5;
+    const double k = 1.0;
+    const double m_param = 5.0;
+    const double t_critical = 2.5;
+    const double mu = 0.34;
+    const double g = 9.81;
+    const double D_max = 100.0; 
 
-    std::vector<CpService::PerceivedObjectSnapshot> selectedSnapshots;
-    std::vector<std::size_t> selectedIndices;
-
-    // RSU global coordinates
+    // rsu and ego vehicle information
     double rsuGlobalX = mVehicleDataProvider->position().x;
     double rsuGlobalY = mVehicleDataProvider->position().y;
 
-    // vehicle's global coordinates
     auto traci = this->getMiddleware().getTraCICommandInterface();
-    veins::Coord targetVehiclePos = traci->vehicle(std::to_string(targetVehicleId)).getPosition();
+    auto egoVehicle = traci->vehicle(std::to_string(targetVehicleId));
+    veins::Coord egoPos = egoVehicle.getPosition();
+    double ego_v = egoVehicle.getSpeed(); 
+    
+    double egoAngleRad = egoVehicle.getAngle() * M_PI / 180.0;
+    double ego_vx = ego_v * std::sin(egoAngleRad);
+    double ego_vy = ego_v * std::cos(egoAngleRad);
 
+    std::vector<CpService::PerceivedObjectSnapshot> selectedSnapshots;
+    std::vector<std::size_t> selectedIndices;
     size_t localIndex = 0;
     
+    // Filtering with distance
     for (const auto& pair : mGlobalObstaclesList) {
-        const auto& obstacle = pair.second;
+        const auto& target = pair.second;
 
-        double distX = obstacle.x - targetVehiclePos.x;
-        double distY = obstacle.y - targetVehiclePos.y;
-        double distToTarget = std::sqrt(distX * distX + distY * distY);
+        double dx = egoPos.x - target.x;
+        double dy = egoPos.y - target.y;
+        double D_squared = (dx * dx) + (dy * dy);
 
-        // TODO: modify inclusion rule
-        if (distToTarget <= 50.0 && obstacle.reliabilityRatio > 0.5) {
+        // skip if object is far
+        if (D_squared > (D_max * D_max)) {
+            continue; 
+        }
+
+        double targetAngleRad = target.heading * M_PI / 180.0;
+        double target_vx = target.speed * std::sin(targetAngleRad);
+        double target_vy = target.speed * std::cos(targetAngleRad);
+
+        double dvx = ego_vx - target_vx;
+        double dvy = ego_vy - target_vy;
+        
+        double dot_product = (dx * dvx) + (dy * dvy);
+        double v_rel_sq = (dvx * dvx) + (dvy * dvy);
+
+        // Distance Risk Assessment
+        double TTCE = 0.0; // Time To Closest Encounter
+        if (v_rel_sq > 0.0001) {
+            double t_min = -dot_product / v_rel_sq;
+            TTCE = std::max(0.0, t_min);
+        }
+
+        // DCE (Distance to Closest Encounter
+        double dce_x = dx + (dvx * TTCE);
+        double dce_y = dy + (dvy * TTCE);
+        double DCE = std::sqrt((dce_x * dce_x) + (dce_y * dce_y));
+
+        // safe distance for brake
+        double d_safe = (ego_v * t_critical) + ((ego_v * ego_v) / (2 * mu * g));
+
+        double risk_D = 1.0 / (1.0 + std::exp(k * (DCE - d_safe)));
+        if (risk_D < tau) {
+            continue;
+        }
+        
+        // Time Risk Assessment
+        double risk_T = 1.0 / (1.0 + std::exp(m_param * (TTCE - t_critical)));
+
+        // Inclusion
+        if (risk_D >= tau && risk_T >= tau) {
             
+            // I_Edge = 1, add to downlink
             CpService::PerceivedObjectSnapshot snap;
-            snap.cpsId = obstacle.id;
+            snap.cpsId = target.id;
             
             
-            double relToRsuX = obstacle.x - rsuGlobalX;
-            double relToRsuY = obstacle.y - rsuGlobalY;
-
+            double relToRsuX = target.x - rsuGlobalX;
+            double relToRsuY = target.y - rsuGlobalY;
 
             snap.xCm = std::round(relToRsuX * 100.0); 
             snap.yCm = std::round(relToRsuY * 100.0);
             
-            snap.objectAgeMs = (t_now - obstacle.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
-            snap.objectPerceptionQuality = std::clamp(static_cast<long>(obstacle.reliabilityRatio * 7), 1L, 7L);
-            snap.hasVelocity = false; 
+            snap.objectAgeMs = (t_now - target.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
+            snap.objectPerceptionQuality = std::clamp(static_cast<long>(target.reliabilityRatio * 7), 1L, 7L);
+            snap.hasVelocity = true;
 
             selectedSnapshots.push_back(snap);
             selectedIndices.push_back(localIndex++);
         }
     }
 
-    // add snapshot to ASN.1 PerceivedObjectContainer
-    if (!selectedSnapshots.empty()) {
-        addPerceivedObjectContainer(responseCpm, selectedSnapshots, selectedIndices, mLastCpmTimestamp);
-    }
-
     // geounicast
-    using namespace vanetza;
-    btp::DataRequestB request;
-    request.destination_port = btp::ports::CPM;
-    request.gn.its_aid = aid::CP;
-    request.gn.transport_type = geonet::TransportType::GeoUnicast;
-    
-    request.gn.destination_address = ind.source_address; 
-    request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
-    request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
+    if (!selectedSnapshots.empty()) {
+        Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, countTaiMilliseconds(mTimer->getTime()));
+        addOriginatingRsuContainer(responseCpm);
+        addPerceivedObjectContainer(responseCpm, selectedSnapshots, selectedIndices, mLastCpmTimestamp);
 
-    // send packet through middleware
-    CpObject obj(std::move(responseCpm));
-    emit(scSignalCpmSent, &obj);
+        using namespace vanetza;
+        btp::DataRequestB request;
+        request.destination_port = btp::ports::CPM;
+        request.gn.its_aid = aid::CP;
+        request.gn.transport_type = geonet::TransportType::GeoUnicast;
+        request.gn.destination_address = ind.source_address; 
+        request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
+        request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
 
-    std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
-    std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
-    payload->layer(OsiLayer::Application) = std::move(buffer);
-    
-    this->request(request, std::move(payload));
+        CpObject obj(std::move(responseCpm));
+        emit(scSignalCpmSent, &obj);
+
+        std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
+        std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
+        payload->layer(OsiLayer::Application) = std::move(buffer);
+        
+        this->request(request, std::move(payload));
+    }
 }
 
 void CpService::captureVdpSnapshot()
