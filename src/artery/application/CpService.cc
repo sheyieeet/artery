@@ -23,6 +23,9 @@
 #include <vanetza/dcc/transmit_rate_control.hpp>
 #include <vanetza/geonet/station_type.hpp>
 
+#include "veins/modules/mobility/traci/TraCIMobility.h"
+#include "veins/modules/mobility/traci/TraCICommandInterface.h"
+
 #include <algorithm>
 #include <chrono>
 
@@ -216,20 +219,23 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
 
         omnetpp::SimTime t_now = simTime();
         
-        uint32_t senderVehicleId = cpm->header.stationId;
+        uint32_t senderVehicleId = (**cpm).header.stationId;
         
         // Discard from active list
         for (auto it = mGlobalObstaclesList.begin(); it != mGlobalObstaclesList.end(); ) {
             omnetpp::SimTime t_last = it->second.lastUpdateTime;
-            if ((t_now - t_last).doubleValue() >= 1.0) {
+            if ((t_now - t_last).dbl() >= 1.0) {
                 it = mGlobalObstaclesList.erase(it);
             } else {
                 ++it;
             }
         }
         
-        // search CPM, PerceivedObjectContainer, add to list
-        for (const auto& container : cpm->payload.cpmContainers.list) {
+
+        auto& containerList = (**cpm).payload.cpmContainers.list;
+        for (int c_idx = 0; c_idx < containerList.count; ++c_idx) {
+            auto* container = containerList.array[c_idx];
+            
             if (container->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
                 auto& poc = container->containerData.choice.PerceivedObjectContainer;
                 
@@ -244,20 +250,31 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                     
                     // speed and heading
                     double obsSpeed = 0.0;
-					double obsHeading = 0.0;
-					if (po->velocity != nullptr) {
-						 // speed (m/s)
-						 obsSpeed = po->velocity->choice.polarVelocity.velocityMagnitude.speedValue / 100.0;
-						 // heading (degree)
-						 obsHeading = po->velocity->choice.polarVelocity.velocityDirection.value / 10.0;
-					} 
-					newObs.speed = obsSpeed;
-					newObs.heading = obsHeading;
-					
-                    // position of source station(vehicle)
-                    auto traci = this->getMiddleware().getTraCICommandInterface();
-                    auto senderVehicle = traci->vehicle(std::to_string(senderVehicleId));
-                    veins::Coord senderRealPos = senderVehicle.getPosition(); // (X,Y) of the vehicle
+                    double obsHeading = 0.0;
+                    if (po->velocity != nullptr) {
+                         // speed (m/s)
+                         obsSpeed = po->velocity->choice.polarVelocity.velocityMagnitude.speedValue / 100.0;
+                         // heading (degree)
+                         obsHeading = po->velocity->choice.polarVelocity.velocityDirection.value / 10.0;
+                    } 
+                    
+                    RsuTrackedObstacle newObs;
+                    newObs.speed = obsSpeed;
+                    newObs.heading = obsHeading;
+
+                    veins::Coord senderRealPos(0, 0, 0);
+                    
+                    for (const auto& obj : mLocalEnvironmentModel->allObjects()) {
+                        auto objPtr = obj.first.lock();
+                        if (!objPtr) continue;
+                        
+                        auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
+                        if (traciObj && traciObj->getVehicleData().getStationId() == senderVehicleId) {
+                            senderRealPos.x = traciObj->getVehicleData().position().x.value();
+                            senderRealPos.y = traciObj->getVehicleData().position().y.value();
+                            break;
+                        }
+                    }
 
                     // relative coordinates
                     double relX = po->position.xCoordinate.value / 100.0;
@@ -269,7 +286,6 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
 
                     if (mGlobalObstaclesList.find(objId) == mGlobalObstaclesList.end()) {
                         // empty list or new object -> (O_t = O_t-1 + CPM)
-                        RsuTrackedObstacle newObs;
                         newObs.id = objId;
                         newObs.x = globalX;
                         newObs.y = globalY;
@@ -280,6 +296,8 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                         mGlobalObstaclesList[objId].x = globalX;
                         mGlobalObstaclesList[objId].y = globalY;
                         mGlobalObstaclesList[objId].lastUpdateTime = t_now;
+                        mGlobalObstaclesList[objId].speed = obsSpeed;     // Ensure we update speed 
+                        mGlobalObstaclesList[objId].heading = obsHeading; // Ensure we update heading
                     }
                 }
             }
@@ -310,13 +328,12 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         // Reliability Ratio
         double t_max = 1.0; // max lifespan = 1 s
         for (auto& pair : mGlobalObstaclesList) {
-            double t_elapsed = (t_now - pair.second.lastUpdateTime).doubleValue();
+            double t_elapsed = (t_now - pair.second.lastUpdateTime).dbl();
             pair.second.reliabilityRatio = (t_max - t_elapsed) / t_max;
             if (pair.second.reliabilityRatio < 0.0) pair.second.reliabilityRatio = 0.0;
         }
 
-        // TODO: fix downlink selection logic
-        SendSelectedLink(senderVehicleId, ind);
+        sendSelectedLink(senderVehicleId, ind);
     }
 }
 
@@ -406,10 +423,10 @@ void CpService::sendCpm(const SimTime& T_now)
 
 // This is the custom function to filter and send cpm to selected downlink using custom inclusion rule in this research
 // The objects go through a selection process, and finally some will be included in the cpms for some vehicle 
-void CpService::SendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind)
+void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind)
 {
     omnetpp::SimTime t_now = simTime();
-    
+
     // hyperparameters
     const double tau = 0.5;
     const double k = 1.0;
@@ -417,97 +434,129 @@ void CpService::SendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
     const double t_critical = 2.5;
     const double mu = 0.34;
     const double g = 9.81;
-    const double D_max = 100.0; 
+    const double D_max = 100.0;
 
-    // rsu and ego vehicle information
-    double rsuGlobalX = mVehicleDataProvider->position().x;
-    double rsuGlobalY = mVehicleDataProvider->position().y;
+// rsu and ego vehicle information
+    double rsuGlobalX = mVehicleDataProvider->position().x.value();
+    double rsuGlobalY = mVehicleDataProvider->position().y.value();
 
-    auto traci = this->getMiddleware().getTraCICommandInterface();
-    auto egoVehicle = traci->vehicle(std::to_string(targetVehicleId));
-    veins::Coord egoPos = egoVehicle.getPosition();
-    double ego_v = egoVehicle.getSpeed(); 
-    
-    double egoAngleRad = egoVehicle.getAngle() * M_PI / 180.0;
+    veins::Coord egoPos(0, 0, 0);
+    double ego_v = 0.0;
+    double egoAngleRad = 0.0;
+
+    for (const auto& obj : mLocalEnvironmentModel->allObjects()) {
+        auto objPtr = obj.first.lock();
+        if (!objPtr) continue;
+        
+        auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
+        if (traciObj && traciObj->getVehicleData().getStationId() == targetVehicleId) {
+            egoPos.x = traciObj->getVehicleData().position().x.value();
+            egoPos.y = traciObj->getVehicleData().position().y.value();
+            ego_v = traciObj->getVehicleData().speed().value();
+            // Convert native heading (degrees) to Radians
+            egoAngleRad = traciObj->getVehicleData().heading().value() * (M_PI / 180.0);
+            break;
+        }
+    }
+
     double ego_vx = ego_v * std::sin(egoAngleRad);
     double ego_vy = ego_v * std::cos(egoAngleRad);
 
     std::vector<CpService::PerceivedObjectSnapshot> selectedSnapshots;
     std::vector<std::size_t> selectedIndices;
     size_t localIndex = 0;
+
+    // Create Spatial Grid Map
+    std::map<std::pair<int, int>, std::vector<RsuTrackedObstacle>> spatialGrid;
     
-    // Filtering with distance
     for (const auto& pair : mGlobalObstaclesList) {
         const auto& target = pair.second;
-
-        double dx = egoPos.x - target.x;
-        double dy = egoPos.y - target.y;
-        double D_squared = (dx * dx) + (dy * dy);
-
-        // skip if object is far
-        if (D_squared > (D_max * D_max)) {
-            continue; 
-        }
-
-        double targetAngleRad = target.heading * M_PI / 180.0;
-        double target_vx = target.speed * std::sin(targetAngleRad);
-        double target_vy = target.speed * std::cos(targetAngleRad);
-
-        double dvx = ego_vx - target_vx;
-        double dvy = ego_vy - target_vy;
-        
-        double dot_product = (dx * dvx) + (dy * dvy);
-        double v_rel_sq = (dvx * dvx) + (dvy * dvy);
-
-        // Distance Risk Assessment
-        double TTCE = 0.0; // Time To Closest Encounter
-        if (v_rel_sq > 0.0001) {
-            double t_min = -dot_product / v_rel_sq;
-            TTCE = std::max(0.0, t_min);
-        }
-
-        // DCE (Distance to Closest Encounter
-        double dce_x = dx + (dvx * TTCE);
-        double dce_y = dy + (dvy * TTCE);
-        double DCE = std::sqrt((dce_x * dce_x) + (dce_y * dce_y));
-
-        // safe distance for brake
-        double d_safe = (ego_v * t_critical) + ((ego_v * ego_v) / (2 * mu * g));
-
-        double risk_D = 1.0 / (1.0 + std::exp(k * (DCE - d_safe)));
-        if (risk_D < tau) {
-            continue;
-        }
-        
-        // Time Risk Assessment
-        double risk_T = 1.0 / (1.0 + std::exp(m_param * (TTCE - t_critical)));
-
-        // Inclusion
-        if (risk_D >= tau && risk_T >= tau) {
-            
-            // I_Edge = 1, add to downlink
-            CpService::PerceivedObjectSnapshot snap;
-            snap.cpsId = target.id;
-            
-            
-            double relToRsuX = target.x - rsuGlobalX;
-            double relToRsuY = target.y - rsuGlobalY;
-
-            snap.xCm = std::round(relToRsuX * 100.0); 
-            snap.yCm = std::round(relToRsuY * 100.0);
-            
-            snap.objectAgeMs = (t_now - target.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
-            snap.objectPerceptionQuality = std::clamp(static_cast<long>(target.reliabilityRatio * 7), 1L, 7L);
-            snap.hasVelocity = true;
-
-            selectedSnapshots.push_back(snap);
-            selectedIndices.push_back(localIndex++);
-        }
+        int g_x = std::floor(target.x / D_max);
+        int g_y = std::floor(target.y / D_max);
+        spatialGrid[{g_x, g_y}].push_back(target);
     }
 
+    int ego_grid_x = std::floor(egoPos.x / D_max);
+    int ego_grid_y = std::floor(egoPos.y / D_max);
+
+    for (int i = -1; i <= 1; i++) {
+        for (int j = -1; j <= 1; j++) {
+            auto cell_it = spatialGrid.find({ego_grid_x + i, ego_grid_y + j});
+            
+            if (cell_it != spatialGrid.end()) {
+                for (const auto& target : cell_it->second) {
+                    
+                    double dx = egoPos.x - target.x;
+                    double dy = egoPos.y - target.y;
+                    double D_squared = (dx * dx) + (dy * dy);
+                    
+                    // skip if object is far
+                    if (D_squared > (D_max * D_max)) {
+                        continue;
+                    }
+
+                    double targetAngleRad = target.heading * M_PI / 180.0;
+                    double target_vx = target.speed * std::sin(targetAngleRad);
+                    double target_vy = target.speed * std::cos(targetAngleRad);
+
+                    double dvx = ego_vx - target_vx;
+                    double dvy = ego_vy - target_vy;
+                    
+                    double dot_product = (dx * dvx) + (dy * dvy);
+                    double v_rel_sq = (dvx * dvx) + (dvy * dvy);
+                    
+                    // Distance Risk Assessment
+                    double TTCE = 0.0;
+                    
+                    // Time To Closest Encounter
+                    if (v_rel_sq > 0.0001) {
+                        double t_min = -dot_product / v_rel_sq;
+                        TTCE = std::max(0.0, t_min);
+                    }
+
+                    // DCE (Distance to Closest Encounter)
+                    double dce_x = dx + (dvx * TTCE);
+                    double dce_y = dy + (dvy * TTCE);
+                    double DCE = std::sqrt((dce_x * dce_x) + (dce_y * dce_y));
+                    
+                    // safe distance for brake
+                    double d_safe = (ego_v * t_critical) + ((ego_v * ego_v) / (2 * mu * g));
+                    double risk_D = 1.0 / (1.0 + std::exp(k * (DCE - d_safe)));
+                    
+                    if (risk_D < tau) {
+                        continue;
+                    }
+                    
+                    // Time Risk Assessment
+                    double risk_T = 1.0 / (1.0 + std::exp(m_param * (TTCE - t_critical)));
+                    
+                    // Inclusion
+                    if (risk_D >= tau && risk_T >= tau) {
+                        // I_Edge = 1, add to downlink
+                        CpService::PerceivedObjectSnapshot snap;
+                        snap.cpsId = target.id;
+                        
+                        double relToRsuX = target.x - rsuGlobalX;
+                        double relToRsuY = target.y - rsuGlobalY;
+
+                        snap.xCm = std::round(relToRsuX * 100.0); 
+                        snap.yCm = std::round(relToRsuY * 100.0);
+                        snap.objectAgeMs = (t_now - target.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
+                        snap.objectPerceptionQuality = std::clamp(static_cast<long>(target.reliabilityRatio * 7), 1L, 7L);
+                        snap.hasVelocity = true;
+
+                        selectedSnapshots.push_back(snap);
+                        selectedIndices.push_back(localIndex++);
+                    }
+                } 
+            } 
+        } 
+    } 
+
     // geounicast
+// V2X Transmission (Fallback to SHB)
     if (!selectedSnapshots.empty()) {
-        Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, countTaiMilliseconds(mTimer->getTime()));
+        Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, countTaiMilliseconds(mTimer->getTimeFor(t_now)));
         addOriginatingRsuContainer(responseCpm);
         addPerceivedObjectContainer(responseCpm, selectedSnapshots, selectedIndices, mLastCpmTimestamp);
 
@@ -515,8 +564,9 @@ void CpService::SendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
         btp::DataRequestB request;
         request.destination_port = btp::ports::CPM;
         request.gn.its_aid = aid::CP;
-        request.gn.transport_type = geonet::TransportType::GeoUnicast;
-        request.gn.destination_address = ind.source_address; 
+        
+        // Vanetza does not support GeoUnicast, falling back to Single Hop Broadcast
+        request.gn.transport_type = geonet::TransportType::SHB;
         request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
         request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
 
@@ -526,7 +576,6 @@ void CpService::SendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
         std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
         std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
         payload->layer(OsiLayer::Application) = std::move(buffer);
-        
         this->request(request, std::move(payload));
     }
 }
@@ -1312,3 +1361,4 @@ void addPerceivedObjectContainer(
 
 
 }  // namespace artery
+
