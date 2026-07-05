@@ -232,18 +232,11 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         emit(scSignalCpmReceived, &obj);
 
         // Log received CPM metrics
-        const auto payload = vanetza::create_byte_view(*packet, vanetza::OsiLayer::Application);
-        size_t rxSize = payload.size();
-
-        double rxInterval = (simTime() - mLastRxTimestamp).dbl();
-        if (rxInterval > 0) {
-            double rxThroughput = (rxSize * 8.0) / rxInterval; // bits per second
-            emit(scSignalCpmRxThroughput, rxThroughput);
-            writeMetricToCsv("RX_Throughput", rxThroughput);
-        }
-        mLastRxTimestamp = simTime();
-
         size_t numRxObjects = 0;
+        size_t numRxSensors = 0;
+        bool hasRsuContainer = false;
+        bool hasVehicleContainer = false;
+        
         auto& containerList = (**cpm).payload.cpmContainers.list;
         for (int c_idx = 0; c_idx < containerList.count; ++c_idx) {
             auto* container = containerList.array[c_idx];
@@ -266,8 +259,40 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                     }
                     mRxObjectLastUpdateTime[objId] = simTime();
                 }
+            } else if (container->containerId == Vanetza_ITS2_CpmContainerId_sensorInformationContainer) {
+                auto& sic = container->containerData.choice.SensorInformationContainer;
+                numRxSensors += sic.sensors.list.count;
+            } else if (container->containerId == Vanetza_ITS2_CpmContainerId_originatingVehicleContainer) {
+                hasVehicleContainer = true;
+            } else if (container->containerId == Vanetza_ITS2_CpmContainerId_originatingRsuContainer) {
+                hasRsuContainer = true;
             }
         }
+        
+        // Estimate size based on containers present
+        size_t rxSize = 22; // Header + Management Container
+        if (hasRsuContainer) {
+            rxSize += 4;
+        } else if (hasVehicleContainer) {
+            rxSize += 35;
+        } else {
+            rxSize += 35; // Default fallback
+        }
+        if (numRxSensors > 0) {
+            rxSize += 10 + 20 * numRxSensors;
+        }
+        if (numRxObjects > 0) {
+            rxSize += 5 + 35 * numRxObjects;
+        }
+
+        double rxInterval = (simTime() - mLastRxTimestamp).dbl();
+        if (rxInterval > 0) {
+            double rxThroughput = (rxSize * 8.0) / rxInterval; // bits per second
+            emit(scSignalCpmRxThroughput, rxThroughput);
+            writeMetricToCsv("RX_Throughput", rxThroughput);
+        }
+        mLastRxTimestamp = simTime();
+
         emit(scSignalCpmRxObjectCount, (long)numRxObjects);
         writeMetricToCsv("RX_ObjectCount", numRxObjects);
 
@@ -474,10 +499,23 @@ void CpService::sendCpm(const SimTime& T_now)
     CpObject obj(std::move(cpm));
     emit(scSignalCpmSent, &obj);
 
+    // Estimate size of CPM safely
+    size_t txSize = 22; // Header + Management Container
+    if (mVdpSnapshot.stationType == static_cast<int>(vanetza::geonet::StationType::RSU)) {
+        txSize += 4;
+    } else {
+        txSize += 35;
+    }
+    if (checkSensorInformationTrigger(T_now)) {
+        txSize += 10 + 20 * mSensorSnapshot.size();
+    }
+    if (includeObjects) {
+        txSize += 5 + 35 * mSelectedCpmObjects.size();
+    }
+
     using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
-    size_t txSize = buffer->size();
     payload->layer(OsiLayer::Application) = std::move(buffer);
     this->request(request, std::move(payload));
 
@@ -647,9 +685,14 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
         CpObject obj(std::move(responseCpm));
         emit(scSignalCpmSent, &obj);
 
+        // Estimate size of CPM safely (RSU selected link does not contain sensor info container)
+        size_t txSize = 22 + 4; // Header + Management Container + RSU Container
+        if (!selectedSnapshots.empty()) {
+            txSize += 5 + 35 * selectedSnapshots.size();
+        }
+
         std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
         std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
-        size_t txSize = buffer->size();
         payload->layer(OsiLayer::Application) = std::move(buffer);
         this->request(request, std::move(payload));
 
