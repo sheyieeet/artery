@@ -20,9 +20,21 @@ simple CpService like ItsG5Service
     parameters:
         @signal[CpmReceived](type=CpObject);
         @signal[CpmSent](type=CpObject);
+        @signal[CpmTxThroughput](type=double);
+        @signal[CpmRxThroughput](type=double);
+        @signal[CpmChannelLoad](type=double);
+        @signal[CpmTxObjectCount](type=long);
+        @signal[CpmRxObjectCount](type=long);
+        @signal[CpmObjectUpdateInterval](type=double);
 
         @statistic[reception](source=CpmReceived;record=vector(cpmStationId)?,vector(cpmReferenceTime)?);
         @statistic[transmission](source=CpmSent;record=vector(cpmStationId)?,vector(cpmReferenceTime)?);
+        @statistic[cpmTxThroughput](source=CpmTxThroughput;record=vector?,timeavg?);
+        @statistic[cpmRxThroughput](source=CpmRxThroughput;record=vector?,timeavg?);
+        @statistic[cpmChannelLoad](source=CpmChannelLoad;record=vector?,timeavg?);
+        @statistic[cpmTxObjectCount](source=CpmTxObjectCount;record=vector?,timeavg?);
+        @statistic[cpmRxObjectCount](source=CpmRxObjectCount;record=vector?,timeavg?);
+        @statistic[cpmObjectUpdateInterval](source=CpmObjectUpdateInterval;record=vector?,timeavg?);
 
         // evaluate DCC transmission interval restrictions
         bool withDccRestriction = default(true);

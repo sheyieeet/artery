@@ -25,9 +25,12 @@
 
 #include "veins/modules/mobility/traci/TraCIMobility.h"
 #include "veins/modules/mobility/traci/TraCICommandInterface.h"
+#include "artery/nic/RadioDriverBase.h"
+#include <vanetza/common/byte_view.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
 
 namespace artery
 {
@@ -36,6 +39,12 @@ using namespace omnetpp;
 
 static const simsignal_t scSignalCpmReceived = cComponent::registerSignal("CpmReceived");
 static const simsignal_t scSignalCpmSent = cComponent::registerSignal("CpmSent");
+static const simsignal_t scSignalCpmTxThroughput = cComponent::registerSignal("CpmTxThroughput");
+static const simsignal_t scSignalCpmRxThroughput = cComponent::registerSignal("CpmRxThroughput");
+static const simsignal_t scSignalCpmChannelLoad = cComponent::registerSignal("CpmChannelLoad");
+static const simsignal_t scSignalCpmTxObjectCount = cComponent::registerSignal("CpmTxObjectCount");
+static const simsignal_t scSignalCpmRxObjectCount = cComponent::registerSignal("CpmRxObjectCount");
+static const simsignal_t scSignalCpmObjectUpdateInterval = cComponent::registerSignal("CpmObjectUpdateInterval");
 
 // CPM object/sensor ID allocation constants
 static constexpr std::size_t kCpmObjectIdSpace = 65536;
@@ -198,6 +207,16 @@ void CpService::initialize()
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
 
     const auto stationType = mVehicleDataProvider->getStationType();
+
+    // Initialize custom metrics tracking fields
+    mLastTxTimestamp = simTime();
+    mLastRxTimestamp = simTime();
+    mLastChannelLoad = 0.0;
+    mRxObjectLastUpdateTime.clear();
+
+    if (findHost()) {
+        findHost()->subscribe(RadioDriverBase::ChannelLoadSignal, this);
+    }
 }
 
 void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_ptr<vanetza::UpPacket> packet)
@@ -211,6 +230,46 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper; 
         emit(scSignalCpmReceived, &obj);
+
+        // Log received CPM metrics
+        const auto payload = vanetza::create_byte_view(*packet, vanetza::OsiLayer::Application);
+        size_t rxSize = payload.size();
+
+        double rxInterval = (simTime() - mLastRxTimestamp).dbl();
+        if (rxInterval > 0) {
+            double rxThroughput = (rxSize * 8.0) / rxInterval; // bits per second
+            emit(scSignalCpmRxThroughput, rxThroughput);
+            writeMetricToCsv("RX_Throughput", rxThroughput);
+        }
+        mLastRxTimestamp = simTime();
+
+        size_t numRxObjects = 0;
+        auto& containerList = (**cpm).payload.cpmContainers.list;
+        for (int c_idx = 0; c_idx < containerList.count; ++c_idx) {
+            auto* container = containerList.array[c_idx];
+            if (container->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
+                auto& poc = container->containerData.choice.PerceivedObjectContainer;
+                numRxObjects += poc.perceivedObjects.list.count;
+                
+                for (size_t i = 0; i < poc.perceivedObjects.list.count; ++i) {
+                    auto* po = poc.perceivedObjects.list.array[i];
+                    long objId = 0;
+                    if (po->objectId) {
+                        objId = *(po->objectId);
+                    }
+                    
+                    auto it = mRxObjectLastUpdateTime.find(objId);
+                    if (it != mRxObjectLastUpdateTime.end()) {
+                        omnetpp::SimTime timeDiff = simTime() - it->second;
+                        emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
+                        writeMetricToCsv("Object_UpdateInterval", timeDiff.dbl(), objId);
+                    }
+                    mRxObjectLastUpdateTime[objId] = simTime();
+                }
+            }
+        }
+        emit(scSignalCpmRxObjectCount, (long)numRxObjects);
+        writeMetricToCsv("RX_ObjectCount", numRxObjects);
 
         // only run merging at RSU
         if (mVehicleDataProvider->getStationType() != vanetza::geonet::StationType::RSU) {
@@ -391,7 +450,8 @@ void CpService::sendCpm(const SimTime& T_now)
     if (checkPerceptionRegionTrigger()) {
         addPerceptionRegionContainer(cpm);
     }
-    if (checkPerceivedObjectTrigger(T_now)) {
+    bool includeObjects = checkPerceivedObjectTrigger(T_now);
+    if (includeObjects) {
         addPerceivedObjectContainer(cpm, mPerceivedObjectSnapshot, mSelectedCpmObjects, mLastCpmTimestamp);
     }
 
@@ -417,8 +477,22 @@ void CpService::sendCpm(const SimTime& T_now)
     using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
+    size_t txSize = buffer->size();
     payload->layer(OsiLayer::Application) = std::move(buffer);
     this->request(request, std::move(payload));
+
+    // Log TX CPM metrics
+    double txInterval = (T_now - mLastTxTimestamp).dbl();
+    if (txInterval > 0) {
+        double txThroughput = (txSize * 8.0) / txInterval; // bits per second
+        emit(scSignalCpmTxThroughput, txThroughput);
+        writeMetricToCsv("TX_Throughput", txThroughput);
+    }
+    mLastTxTimestamp = T_now;
+
+    size_t numTxObjects = includeObjects ? mSelectedCpmObjects.size() : 0;
+    emit(scSignalCpmTxObjectCount, (long)numTxObjects);
+    writeMetricToCsv("TX_ObjectCount", numTxObjects);
 }
 
 // This is the custom function to filter and send cpm to selected downlink using custom inclusion rule in this research
@@ -575,8 +649,22 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
 
         std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
         std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
+        size_t txSize = buffer->size();
         payload->layer(OsiLayer::Application) = std::move(buffer);
         this->request(request, std::move(payload));
+
+        // Log TX CPM metrics
+        double txInterval = (t_now - mLastTxTimestamp).dbl();
+        if (txInterval > 0) {
+            double txThroughput = (txSize * 8.0) / txInterval; // bits per second
+            emit(scSignalCpmTxThroughput, txThroughput);
+            writeMetricToCsv("TX_Throughput", txThroughput);
+        }
+        mLastTxTimestamp = t_now;
+
+        size_t numTxObjects = selectedSnapshots.size();
+        emit(scSignalCpmTxObjectCount, (long)numTxObjects);
+        writeMetricToCsv("TX_ObjectCount", numTxObjects);
     }
 }
 
@@ -1357,6 +1445,56 @@ void addPerceivedObjectContainer(
     if (!message.validate(error)) {
         throw cRuntimeError("Invalid Perceived Object Container: %s", error.c_str());
     }
+}
+
+void CpService::finish()
+{
+    if (findHost()) {
+        findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
+    }
+    ItsG5BaseService::finish();
+}
+
+void CpService::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details)
+{
+    if (signal == RadioDriverBase::ChannelLoadSignal) {
+        ASSERT(value >= 0.0 && value <= 1.0);
+        mLastChannelLoad = value;
+        emit(scSignalCpmChannelLoad, value);
+        writeMetricToCsv("ChannelLoad", value);
+    }
+}
+
+void CpService::writeMetricToCsv(const std::string& metricType, double value, long objectId)
+{
+    std::string filename = "cpm_metrics.csv";
+    bool fileExists = false;
+    {
+        std::ifstream infile(filename);
+        if (infile.good()) {
+            fileExists = true;
+        }
+    }
+    std::ofstream outfile(filename, std::ios_base::app);
+    if (!fileExists) {
+        outfile << "Timestamp,StationID,StationType,Metric,Value,ObjectID\n";
+    }
+    std::string stationTypeStr = "Unknown";
+    if (mVehicleDataProvider) {
+        using vanetza::geonet::StationType;
+        StationType st = mVehicleDataProvider->getStationType();
+        if (st == StationType::RSU) {
+            stationTypeStr = "RSU";
+        } else {
+            stationTypeStr = "Vehicle";
+        }
+    }
+    outfile << simTime().dbl() << ","
+            << (mVehicleDataProvider ? mVehicleDataProvider->getStationId() : 0) << ","
+            << stationTypeStr << ","
+            << metricType << ","
+            << value << ","
+            << objectId << "\n";
 }
 
 

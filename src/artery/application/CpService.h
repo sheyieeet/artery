@@ -22,6 +22,7 @@
 #include <optional>
 #include <unordered_map>
 #include <vector>
+#include <string>
 
 namespace artery
 {
@@ -103,8 +104,10 @@ public:
 
     CpService();
     void initialize() override;
+    void finish() override;
     void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
     void trigger() override;
+    void receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details) override;
 
 private:
 
@@ -188,6 +191,13 @@ private:
     std::vector<int> mCps2SensorId;  // cpsId -> LEM sensorId, kInvalidLemSensorId if not in use
     std::vector<omnetpp::SimTime> mCpmSensorIdLastUsed;
     std::vector<SensorSnapshot> mSensorSnapshot;
+
+    // Custom metrics logging fields & helpers
+    omnetpp::SimTime mLastTxTimestamp = omnetpp::SimTime::ZERO;
+    omnetpp::SimTime mLastRxTimestamp = omnetpp::SimTime::ZERO;
+    double mLastChannelLoad = 0.0;
+    std::unordered_map<long, omnetpp::SimTime> mRxObjectLastUpdateTime;
+    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
 };
 
 Cpm createCollectivePerceptionMessage(const CpService::VdpSnapshot& vdp, uint64_t referenceTime);
