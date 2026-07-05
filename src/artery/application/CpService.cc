@@ -9,7 +9,8 @@
 #include "artery/application/CpObject.h"
 #include "artery/application/MultiChannelPolicy.h"
 #include "artery/application/VehicleDataProvider.h"
-#include "artery/envmod/TraCIEnvironmentModelObject.h"
+#include "artery/utility/IdentityRegistry.h"
+#include "artery/application/Middleware.h"
 #include "artery/envmod/sensor/FovSensor.h"
 #include "artery/utility/round.h"
 #include "artery/utility/simtime_cast.h"
@@ -348,15 +349,20 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
 
                     veins::Coord senderRealPos(0, 0, 0);
                     
-                    for (const auto& obj : mLocalEnvironmentModel->allObjects()) {
-                        auto objPtr = obj.first.lock();
-                        if (!objPtr) continue;
-                        
-                        auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
-                        if (traciObj && traciObj->getVehicleData().getStationId() == senderVehicleId) {
-                            senderRealPos.x = traciObj->getVehicleData().position().x.value();
-                            senderRealPos.y = traciObj->getVehicleData().position().y.value();
-                            break;
+                    auto* idRegistryMod = omnetpp::getSimulation()->getModuleByPath("idRegistry");
+                    auto* idRegistry = dynamic_cast<IdentityRegistry*>(idRegistryMod);
+                    if (idRegistry) {
+                        boost::optional<Identity> identity = idRegistry->lookup<IdentityRegistry::application>(senderVehicleId);
+                        if (identity && identity->host) {
+                            cModule* middlewareMod = identity->host->getSubmodule("middleware");
+                            Middleware* middleware = dynamic_cast<Middleware*>(middlewareMod);
+                            if (middleware) {
+                                const auto* vdp = middleware->getFacilities().get_const_ptr<VehicleDataProvider>();
+                                if (vdp) {
+                                    senderRealPos.x = vdp->position().x.value();
+                                    senderRealPos.y = vdp->position().y.value();
+                                }
+                            }
                         }
                     }
 
@@ -556,18 +562,23 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
     double ego_v = 0.0;
     double egoAngleRad = 0.0;
 
-    for (const auto& obj : mLocalEnvironmentModel->allObjects()) {
-        auto objPtr = obj.first.lock();
-        if (!objPtr) continue;
-        
-        auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
-        if (traciObj && traciObj->getVehicleData().getStationId() == targetVehicleId) {
-            egoPos.x = traciObj->getVehicleData().position().x.value();
-            egoPos.y = traciObj->getVehicleData().position().y.value();
-            ego_v = traciObj->getVehicleData().speed().value();
-            // Convert native heading (degrees) to Radians
-            egoAngleRad = traciObj->getVehicleData().heading().value() * (M_PI / 180.0);
-            break;
+    auto* idRegistryMod = omnetpp::getSimulation()->getModuleByPath("idRegistry");
+    auto* idRegistry = dynamic_cast<IdentityRegistry*>(idRegistryMod);
+    if (idRegistry) {
+        boost::optional<Identity> identity = idRegistry->lookup<IdentityRegistry::application>(targetVehicleId);
+        if (identity && identity->host) {
+            cModule* middlewareMod = identity->host->getSubmodule("middleware");
+            Middleware* middleware = dynamic_cast<Middleware*>(middlewareMod);
+            if (middleware) {
+                const auto* vdp = middleware->getFacilities().get_const_ptr<VehicleDataProvider>();
+                if (vdp) {
+                    egoPos.x = vdp->position().x.value();
+                    egoPos.y = vdp->position().y.value();
+                    ego_v = vdp->speed().value();
+                    // Convert native heading (degrees) to Radians
+                    egoAngleRad = vdp->heading().value() * (M_PI / 180.0);
+                }
+            }
         }
     }
 
@@ -764,6 +775,9 @@ CpService::ObjectVdpSnapshotMap CpService::captureObjectVdpSnapshot(const LocalE
     ObjectVdpSnapshotMap snapshots;
     snapshots.reserve(objects.size());
 
+    auto* idRegistryMod = omnetpp::getSimulation()->getModuleByPath("idRegistry");
+    auto* idRegistry = dynamic_cast<IdentityRegistry*>(idRegistryMod);
+
     for (const LocalEnvironmentModel::TrackedObject& obj : objects) {
         const LocalEnvironmentModel::Object& object = obj.first;
         const LocalEnvironmentModel::Tracking& tracking = obj.second;
@@ -773,13 +787,21 @@ CpService::ObjectVdpSnapshotMap CpService::captureObjectVdpSnapshot(const LocalE
         }
 
         ObjectVdpSnapshot snap;
-        auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
-        if (traciObj) {
-            const VehicleDataProvider& vdpObj = traciObj->getVehicleData();
-            snap.hasVdpData = true;
-            snap.speed = vdpObj.speed();
-            snap.heading = vdpObj.heading();
-            snap.stationType = vdpObj.getStationType();
+        if (idRegistry) {
+            boost::optional<Identity> identity = idRegistry->lookup<IdentityRegistry::traci>(objPtr->getExternalId());
+            if (identity && identity->host) {
+                cModule* middlewareMod = identity->host->getSubmodule("middleware");
+                Middleware* middleware = dynamic_cast<Middleware*>(middlewareMod);
+                if (middleware) {
+                    const auto* vdp = middleware->getFacilities().get_const_ptr<VehicleDataProvider>();
+                    if (vdp) {
+                        snap.hasVdpData = true;
+                        snap.speed = vdp->speed();
+                        snap.heading = vdp->heading();
+                        snap.stationType = vdp->getStationType();
+                    }
+                }
+            }
         }
 
         snapshots.emplace(static_cast<uint32_t>(tracking.id()), std::move(snap));

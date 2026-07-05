@@ -33,7 +33,11 @@ const std::string VehicleController::getVehicleClass() const
 
 auto VehicleController::getMaxSpeed() const -> Velocity
 {
-    return m_cache->get<libsumo::VAR_MAXSPEED>() * si::meter_per_second;
+    try {
+        return m_cache->get<libsumo::VAR_MAXSPEED>() * si::meter_per_second;
+    } catch (const std::exception& e) {
+        return 0.0 * si::meter_per_second;
+    }
 }
 
 void VehicleController::setMaxSpeed(Velocity v)
