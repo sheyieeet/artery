@@ -10,7 +10,6 @@
     	<collision.check-junctions value="true"/>
         <collision.action value="remove"/>
         <time-to-teleport value="-1"/> 
-        <default.emergencydecel value="-1"/>
     </processing>
 
     <time>

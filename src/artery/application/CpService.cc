@@ -5,6 +5,8 @@
 
 #include "artery/application/CpService.h"
 
+#include <mutex>
+#include <fstream>
 #include "artery/application/Asn1PacketVisitor.h"
 #include "artery/application/CpObject.h"
 #include "artery/application/MultiChannelPolicy.h"
@@ -149,11 +151,22 @@ CpService::CpService() : mGenCpmMin{100, SIMTIME_MS}, mGenCpmMax{1000, SIMTIME_M
 {
 }
 
+CpService::~CpService()
+{
+    if (findHost()) {
+        try {
+            findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
+        } catch (...) {}
+    }
+}
+
 void CpService::initialize()
 {
     ItsG5BaseService::initialize();
     mNetworkInterfaceTable = getFacilities().get_const_ptr<NetworkInterfaceTable>();
     mVehicleDataProvider = getFacilities().get_const_ptr<VehicleDataProvider>();
+    mIdentity = getFacilities().get_const_ptr<Identity>();
+    mGeoPosition = getFacilities().get_const_ptr<GeoPosition>();
     mTimer = getFacilities().get_const_ptr<Timer>();
     mLocalDynamicMap = getFacilities().get_mutable_ptr<artery::LocalDynamicMap>();
     mLocalEnvironmentModel = getFacilities().get_mutable_ptr<LocalEnvironmentModel>();
@@ -207,7 +220,7 @@ void CpService::initialize()
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
 
-    const auto stationType = mVehicleDataProvider->getStationType();
+    const auto stationType = mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU;
 
     // Initialize custom metrics tracking fields
     mLastTxTimestamp = simTime();
@@ -262,7 +275,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                 }
             } else if (container->containerId == Vanetza_ITS2_CpmContainerId_sensorInformationContainer) {
                 auto& sic = container->containerData.choice.SensorInformationContainer;
-                numRxSensors += sic.sensors.list.count;
+                numRxSensors += sic.list.count;
             } else if (container->containerId == Vanetza_ITS2_CpmContainerId_originatingVehicleContainer) {
                 hasVehicleContainer = true;
             } else if (container->containerId == Vanetza_ITS2_CpmContainerId_originatingRsuContainer) {
@@ -298,7 +311,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         writeMetricToCsv("RX_ObjectCount", numRxObjects);
 
         // only run merging at RSU
-        if (mVehicleDataProvider->getStationType() != vanetza::geonet::StationType::RSU) {
+        if ((mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU) != vanetza::geonet::StationType::RSU) {
             return; 
         }
 
@@ -317,9 +330,9 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         }
         
 
-        auto& containerList = (**cpm).payload.cpmContainers.list;
-        for (int c_idx = 0; c_idx < containerList.count; ++c_idx) {
-            auto* container = containerList.array[c_idx];
+        auto& cpmContainersList = (**cpm).payload.cpmContainers.list;
+        for (int c_idx = 0; c_idx < cpmContainersList.count; ++c_idx) {
+            auto* container = cpmContainersList.array[c_idx];
             
             if (container->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
                 auto& poc = container->containerData.choice.PerceivedObjectContainer;
@@ -555,8 +568,8 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
     const double D_max = 100.0;
 
 // rsu and ego vehicle information
-    double rsuGlobalX = mVehicleDataProvider->position().x.value();
-    double rsuGlobalY = mVehicleDataProvider->position().y.value();
+    double rsuGlobalX = mVehicleDataProvider ? mVehicleDataProvider->position().x.value() : 0.0;
+    double rsuGlobalY = mVehicleDataProvider ? mVehicleDataProvider->position().y.value() : 0.0;
 
     veins::Coord egoPos(0, 0, 0);
     double ego_v = 0.0;
@@ -724,13 +737,13 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
 
 void CpService::captureVdpSnapshot()
 {
-    mVdpSnapshot.updated = mVehicleDataProvider->updated();
-    mVdpSnapshot.stationId = static_cast<uint32_t>(mVehicleDataProvider->getStationId());
-    mVdpSnapshot.stationType = static_cast<int>(mVehicleDataProvider->getStationType());
-    mVdpSnapshot.position = mVehicleDataProvider->position();
-    mVdpSnapshot.referenceLatitude = round(mVehicleDataProvider->latitude(), vanetza::units::degree * boost::units::si::micro) * 10;
-    mVdpSnapshot.referenceLongitude = round(mVehicleDataProvider->longitude(), vanetza::units::degree * boost::units::si::micro) * 10;
-    mVdpSnapshot.orientationAngleDeciDeg = round(mVehicleDataProvider->heading(), vanetza::units::degree * boost::units::si::deci);
+    mVdpSnapshot.updated = mVehicleDataProvider ? mVehicleDataProvider->updated() : simTime();
+    mVdpSnapshot.stationId = mVehicleDataProvider ? static_cast<uint32_t>(mVehicleDataProvider->getStationId()) : (mIdentity ? mIdentity->application : 0);
+    mVdpSnapshot.stationType = mVehicleDataProvider ? static_cast<int>(mVehicleDataProvider->getStationType()) : static_cast<int>(vanetza::geonet::StationType::RSU);
+    mVdpSnapshot.position = mVehicleDataProvider ? mVehicleDataProvider->position() : artery::Position{0.0, 0.0};
+    mVdpSnapshot.referenceLatitude = mVehicleDataProvider ? round(mVehicleDataProvider->latitude(), vanetza::units::degree * boost::units::si::micro) * 10 : (mGeoPosition ? round(mGeoPosition->latitude, vanetza::units::degree * boost::units::si::micro) * 10 : 0.0);
+    mVdpSnapshot.referenceLongitude = mVehicleDataProvider ? round(mVehicleDataProvider->longitude(), vanetza::units::degree * boost::units::si::micro) * 10 : (mGeoPosition ? round(mGeoPosition->longitude, vanetza::units::degree * boost::units::si::micro) * 10 : 0.0);
+    mVdpSnapshot.orientationAngleDeciDeg = mVehicleDataProvider ? round(mVehicleDataProvider->heading(), vanetza::units::degree * boost::units::si::deci) : 0.0;
 }
 
 void CpService::captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors)
@@ -1477,9 +1490,15 @@ void addPerceivedObjectContainer(
             po->velocity = vanetza::asn1::allocate<Vanetza_ITS2_Velocity3dWithConfidence_t>();
             po->velocity->present = Vanetza_ITS2_Velocity3dWithConfidence_PR_polarVelocity;
             auto& polar = po->velocity->choice.polarVelocity;
-            polar.velocityMagnitude.speedValue = static_cast<long>(std::round(snap.speedMps * 100.0));
+            long speedVal = static_cast<long>(std::round(std::abs(snap.speedMps) * 100.0));
+            if (speedVal > 16383) speedVal = 16383;
+            polar.velocityMagnitude.speedValue = speedVal;
             polar.velocityMagnitude.speedConfidence = Vanetza_ITS2_SpeedConfidence_unavailable;
-            polar.velocityDirection.value = static_cast<long>(std::round(snap.headingDeg * 10.0));
+            
+            double heading = snap.headingDeg;
+            while (heading < 0.0) heading += 360.0;
+            while (heading >= 360.0) heading -= 360.0;
+            polar.velocityDirection.value = static_cast<long>(std::round(heading * 10.0));
             polar.velocityDirection.confidence = Vanetza_ITS2_AngleConfidence_unavailable;
         }
 
@@ -1532,18 +1551,26 @@ void CpService::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t 
 
 void CpService::writeMetricToCsv(const std::string& metricType, double value, long objectId)
 {
-    std::string filename = "cpm_metrics.csv";
-    bool fileExists = false;
-    {
-        std::ifstream infile(filename);
-        if (infile.good()) {
-            fileExists = true;
+    static std::mutex csvMutex;
+    static std::ofstream outfile;
+    
+    std::lock_guard<std::mutex> lock(csvMutex);
+    
+    if (!outfile.is_open()) {
+        std::string filename = "cpm_metrics.csv";
+        bool fileExists = false;
+        {
+            std::ifstream infile(filename);
+            if (infile.good()) {
+                fileExists = true;
+            }
+        }
+        outfile.open(filename, std::ios_base::app);
+        if (!fileExists) {
+            outfile << "Timestamp,StationID,StationType,Metric,Value,ObjectID\n";
         }
     }
-    std::ofstream outfile(filename, std::ios_base::app);
-    if (!fileExists) {
-        outfile << "Timestamp,StationID,StationType,Metric,Value,ObjectID\n";
-    }
+    
     std::string stationTypeStr = "Unknown";
     if (mVehicleDataProvider) {
         using vanetza::geonet::StationType;
@@ -1553,13 +1580,16 @@ void CpService::writeMetricToCsv(const std::string& metricType, double value, lo
         } else {
             stationTypeStr = "Vehicle";
         }
+    } else if (mIdentity) {
+        stationTypeStr = "RSU";
     }
     outfile << simTime().dbl() << ","
-            << (mVehicleDataProvider ? mVehicleDataProvider->getStationId() : 0) << ","
+            << (mVehicleDataProvider ? mVehicleDataProvider->getStationId() : (mIdentity ? mIdentity->application : 0)) << ","
             << stationTypeStr << ","
             << metricType << ","
             << value << ","
             << objectId << "\n";
+    outfile.flush();
 }
 
 

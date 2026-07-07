@@ -103,6 +103,7 @@ public:
     };
 
     CpService();
+    ~CpService() override;
     void initialize() override;
     void finish() override;
     void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
@@ -146,6 +147,8 @@ private:
     ChannelNumber mPrimaryChannel = channel::CCH;
     const NetworkInterfaceTable* mNetworkInterfaceTable = nullptr;
     const VehicleDataProvider* mVehicleDataProvider = nullptr;
+    const Identity* mIdentity = nullptr;
+    const GeoPosition* mGeoPosition = nullptr;
     const Timer* mTimer = nullptr;
     LocalDynamicMap* mLocalDynamicMap = nullptr;
     LocalEnvironmentModel* mLocalEnvironmentModel = nullptr;
