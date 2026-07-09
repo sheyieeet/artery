@@ -1,0 +1,75 @@
+version 2
+run rsu_sensors_test-0-20260709-16:57:21-14165
+attr configname rsu_sensors_test
+attr datetime 20260709-16:57:21
+attr experiment rsu_sensors_test
+attr inifile omnetpp.ini
+attr iterationvars ""
+attr iterationvarsf ""
+attr measurement ""
+attr network artery.envmod.World
+attr processid 14165
+attr repetition 0
+attr replication #0
+attr resultdir results
+attr runnumber 0
+attr seedset 0
+param *.rsu*.environmentModel.*.drawSensorCone true
+param *.rsu*.environmentModel.*.drawLinesOfSight true
+param *.rsu*.environmentModel.*.drawDetectedObjects true
+param *.rsu*.environmentModel.*.drawBlockingObstacles true
+param *.rsu*.environmentModel.sensors "xmldoc(\"rsusensors.xml\")"
+param *.node[*].environmentModel.sensors "xmldoc(\"vehiclesensors.xml\")"
+param *.rsu*.environmentModel.Radar.fovRange 200m
+param *.rsu*.environmentModel.Radar.fovAngle 20.0
+param *.rsu*.environmentModel.SeeThrough.fovRange 50m
+param *.traci.launcher.sumo "\"sumo\""
+param *.traci.core.startTime 25s
+param *.traci.core.version -1
+param *.traci.launcher.typename "\"PosixLauncher\""
+param *.traci.launcher.seed 23423
+param *.traci.launcher.sumocfg "\"grid_scenario.sumocfg\""
+param *.traci.launcher.sumo "\"sumo-gui\""
+param *.traci.nodes.typename "\"InsertionDelayNodeManager\""
+param *.traci.mapper.typename "\"traci.MultiTypeModuleMapper\""
+param *.traci.mapper.vehicleTypes "xmldoc(\"vehicles.xml\")"
+param *.traci.nodes.destroyVehiclesOnCrash true
+param *.staticNodes.nodes "xmldoc(\"grid_5x5/RSUs.xml\")"
+param *.withPhysicalEnvironment true
+param *.physicalEnvironment.groundType "\"FlatGround\""
+param *.radioMedium.pathLossType "\"Gemv2\""
+param *.radioMedium.pathLoss.withSmallScaleVariations false
+param **.identityRegistryModule "\"idRegistry\""
+param *.node[*].numRadios 1
+param *.node[*].wlan[*].radio.transmitter.power "200 mW"
+param *.node[*].middleware.datetime "\"2018-03-19 10:00:00\""
+param *.node[*].middleware.services "xmldoc(\"services.xml\")"
+param *.rsu*.wlan[*].radio.transmitter.power "47.9 mW"
+param *.rsu*.middleware.datetime "\"2018-03-19 10:00:00\""
+param *.rsu*.middleware.services "xmldoc(\"rsuservices.xml\")"
+
+scalar World.traci.launcher port 39531
+scalar World.radioMedium.propagation "Arrival computation count" 488565
+scalar World.radioMedium.pathLoss.classifier countLOS 40605
+scalar World.radioMedium.pathLoss.classifier countNLOSb 402824
+scalar World.radioMedium.pathLoss.classifier countNLOSf 0
+scalar World.radioMedium.pathLoss.classifier countNLOSv 44110
+scalar World.radioMedium "transmission count" 4360
+scalar World.radioMedium "radio frame send count" 487539
+scalar World.radioMedium "reception computation count" 487539
+scalar World.radioMedium "interference computation count" 1410404
+scalar World.radioMedium "reception decision computation count" 73512
+scalar World.radioMedium "listening decision computation count" 849162
+scalar World.radioMedium "reception cache hit" 80.085980835056
+attr unit %
+scalar World.radioMedium "interference cache hit" 66.131999514212
+attr unit %
+scalar World.radioMedium "noise cache hit" 0
+attr unit %
+scalar World.radioMedium "snir cache hit" 49.645219322004
+attr unit %
+scalar World.radioMedium "reception decision cache hit" 50
+attr unit %
+scalar World.radioMedium "reception result cache hit" 0
+attr unit %
+

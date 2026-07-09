@@ -109,6 +109,8 @@ public:
     void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
     void trigger() override;
     void receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details) override;
+    void handleMessage(omnetpp::cMessage* msg) override;
+
 
 private:
 
@@ -125,7 +127,6 @@ private:
     
     void checkTriggeringConditions(const omnetpp::SimTime& T_now);
     void sendCpm(const omnetpp::SimTime& T_now);
-    void sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind);
     void captureVdpSnapshot();
     void captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors);
     ObjectVdpSnapshotMap captureObjectVdpSnapshot(const LocalEnvironmentModel::TrackedObjects& objects) const;
@@ -153,6 +154,7 @@ private:
     LocalDynamicMap* mLocalDynamicMap = nullptr;
     LocalEnvironmentModel* mLocalEnvironmentModel = nullptr;
     VdpSnapshot mVdpSnapshot;
+    omnetpp::cMessage* mCpmTimer = nullptr;
 
     omnetpp::SimTime mGenCpmMin;
     omnetpp::SimTime mGenCpmMax;
