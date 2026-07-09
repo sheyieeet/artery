@@ -147,12 +147,16 @@ void setPOClassification(Vanetza_ITS2_PerceivedObject_t& po, vanetza::geonet::St
 
 Define_Module(CpService)
 
-CpService::CpService() : mGenCpmMin{100, SIMTIME_MS}, mGenCpmMax{1000, SIMTIME_MS}, mGenCpm(mGenCpmMax)
+CpService::CpService() : mGenCpmMin{100, SIMTIME_MS}, mGenCpmMax{1000, SIMTIME_MS}, mGenCpm(mGenCpmMax), cpmTimer(nullptr)
 {
 }
 
 CpService::~CpService()
 {
+    if (cpmTimer) {
+        cancelAndDelete(cpmTimer);
+        cpmTimer = nullptr;
+    }
     if (findHost()) {
         try {
             findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
@@ -227,6 +231,9 @@ void CpService::initialize()
     mLastRxTimestamp = simTime();
     mLastChannelLoad = 0.0;
     mRxObjectLastUpdateTime.clear();
+
+    cpmTimer = new omnetpp::cMessage("cpmTimer");
+    scheduleAt(simTime() + omnetpp::SimTime(0.1), cpmTimer);
 
     if (findHost()) {
         findHost()->subscribe(RadioDriverBase::ChannelLoadSignal, this);
@@ -443,7 +450,19 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
 void CpService::trigger()
 {
     Enter_Method("trigger");
-    checkTriggeringConditions(simTime());
+    if ((mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU) == vanetza::geonet::StationType::RSU) {
+        checkTriggeringConditions(simTime());
+    }
+}
+
+void CpService::handleMessage(omnetpp::cMessage* msg)
+{
+    if (msg == cpmTimer) {
+        if ((mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU) != vanetza::geonet::StationType::RSU) {
+            sendCpm(simTime());
+        }
+        scheduleAt(simTime() + omnetpp::SimTime(0.1), cpmTimer);
+    }
 }
 
 void CpService::checkTriggeringConditions(const SimTime& T_now)
@@ -602,92 +621,23 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
     std::vector<std::size_t> selectedIndices;
     size_t localIndex = 0;
 
-    // Create Spatial Grid Map
-    std::map<std::pair<int, int>, std::vector<RsuTrackedObstacle>> spatialGrid;
-    
     for (const auto& pair : mGlobalObstaclesList) {
         const auto& target = pair.second;
-        int g_x = std::floor(target.x / D_max);
-        int g_y = std::floor(target.y / D_max);
-        spatialGrid[{g_x, g_y}].push_back(target);
+        CpService::PerceivedObjectSnapshot snap;
+        snap.cpsId = target.id;
+        
+        double relToRsuX = target.x - rsuGlobalX;
+        double relToRsuY = target.y - rsuGlobalY;
+
+        snap.xCm = std::round(relToRsuX * 100.0); 
+        snap.yCm = std::round(relToRsuY * 100.0);
+        snap.objectAgeMs = (t_now - target.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
+        snap.objectPerceptionQuality = std::clamp(static_cast<long>(target.reliabilityRatio * 7), 1L, 7L);
+        snap.hasVelocity = true;
+
+        selectedSnapshots.push_back(snap);
+        selectedIndices.push_back(localIndex++);
     }
-
-    int ego_grid_x = std::floor(egoPos.x / D_max);
-    int ego_grid_y = std::floor(egoPos.y / D_max);
-
-    for (int i = -1; i <= 1; i++) {
-        for (int j = -1; j <= 1; j++) {
-            auto cell_it = spatialGrid.find({ego_grid_x + i, ego_grid_y + j});
-            
-            if (cell_it != spatialGrid.end()) {
-                for (const auto& target : cell_it->second) {
-                    
-                    double dx = egoPos.x - target.x;
-                    double dy = egoPos.y - target.y;
-                    double D_squared = (dx * dx) + (dy * dy);
-                    
-                    // skip if object is far
-                    if (D_squared > (D_max * D_max)) {
-                        continue;
-                    }
-
-                    double targetAngleRad = target.heading * M_PI / 180.0;
-                    double target_vx = target.speed * std::sin(targetAngleRad);
-                    double target_vy = target.speed * std::cos(targetAngleRad);
-
-                    double dvx = ego_vx - target_vx;
-                    double dvy = ego_vy - target_vy;
-                    
-                    double dot_product = (dx * dvx) + (dy * dvy);
-                    double v_rel_sq = (dvx * dvx) + (dvy * dvy);
-                    
-                    // Distance Risk Assessment
-                    double TTCE = 0.0;
-                    
-                    // Time To Closest Encounter
-                    if (v_rel_sq > 0.0001) {
-                        double t_min = -dot_product / v_rel_sq;
-                        TTCE = std::max(0.0, t_min);
-                    }
-
-                    // DCE (Distance to Closest Encounter)
-                    double dce_x = dx + (dvx * TTCE);
-                    double dce_y = dy + (dvy * TTCE);
-                    double DCE = std::sqrt((dce_x * dce_x) + (dce_y * dce_y));
-                    
-                    // safe distance for brake
-                    double d_safe = (ego_v * t_critical) + ((ego_v * ego_v) / (2 * mu * g));
-                    double risk_D = 1.0 / (1.0 + std::exp(k * (DCE - d_safe)));
-                    
-                    if (risk_D < tau) {
-                        continue;
-                    }
-                    
-                    // Time Risk Assessment
-                    double risk_T = 1.0 / (1.0 + std::exp(m_param * (TTCE - t_critical)));
-                    
-                    // Inclusion
-                    if (risk_D >= tau && risk_T >= tau) {
-                        // I_Edge = 1, add to downlink
-                        CpService::PerceivedObjectSnapshot snap;
-                        snap.cpsId = target.id;
-                        
-                        double relToRsuX = target.x - rsuGlobalX;
-                        double relToRsuY = target.y - rsuGlobalY;
-
-                        snap.xCm = std::round(relToRsuX * 100.0); 
-                        snap.yCm = std::round(relToRsuY * 100.0);
-                        snap.objectAgeMs = (t_now - target.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
-                        snap.objectPerceptionQuality = std::clamp(static_cast<long>(target.reliabilityRatio * 7), 1L, 7L);
-                        snap.hasVelocity = true;
-
-                        selectedSnapshots.push_back(snap);
-                        selectedIndices.push_back(localIndex++);
-                    }
-                } 
-            } 
-        } 
-    } 
 
     // geounicast
 // V2X Transmission (Fallback to SHB)
@@ -953,143 +903,18 @@ bool CpService::checkPerceptionRegionTrigger()
 
 bool CpService::checkPerceivedObjectTrigger(const SimTime& T_now)
 {
-    if (mObjectInclusionConfig == 0) {
-        // include all perceived objects by default (up to the CPM capacity)
-        return !mPerceivedObjectSnapshot.empty();
-    } else if (mObjectInclusionConfig != 1)
-        EV_ERROR << "Invalid object inclusion configuration: " << mObjectInclusionConfig << endl;
-
-    // mObjectInclusionConfig = 1
-
     if (mPerceivedObjectSnapshot.empty()) {
         return false;
     }
 
-    // determine whether all type A objects should be included this cycle
-    // global type A inclusion can be triggered by:
-    // 1) at least one type A not included for mGenCpmMax / 2, or
-    // 2) at least one newly detected type A since the last CPM
-    bool includeAllTypeA = false;
-    for (const auto idx : mSelectedCpmObjects) {
-        const auto& po = mPerceivedObjectSnapshot[idx];
-        if (po.type != PerceivedObjectType::TypeA) {
-            continue;
-        }
-
-        if (po.objectAgeMs < (T_now - mLastCpmTimestamp).dbl() * 1000) {  // newly detected
-            includeAllTypeA = true;
-            break;  // early exit as soon as the global condition becomes true
-        }
-
-        auto it = mPerceivedObjectHistories.find(static_cast<int>(po.cpsId));
-        if (it == mPerceivedObjectHistories.end()) {
-            continue;
-        }
-
-        if (T_now - it->second.inclusion >= mGenCpmMax / 2) {
-            includeAllTypeA = true;
-            break;  // early exit as soon as the global condition becomes true
-        }
+    mSelectedCpmObjects.clear();
+    for (std::size_t i = 0; i < mPerceivedObjectSnapshot.size(); ++i) {
+        mSelectedCpmObjects.push_back(i);
     }
 
-    std::vector<std::size_t> selected;
-    selected.reserve(mSelectedCpmObjects.size());
-
-    // loop over the perceived objects (snapshot)
     for (const auto idx : mSelectedCpmObjects) {
         auto& po = mPerceivedObjectSnapshot[idx];
-
-        // reset cached metrics for this evaluation
-        po.haveHistory = false;
-        po.distanceDiffM = 0.0;
-        po.speedDiffMps = 0.0;
-        po.orientationDiffDeg = 0.0;
-        po.sinceLastInclusionSeconds = 0.0;
-
-        // hard gate: perception quality check applied before type-specific inclusion rules
-        if (po.objectPerceptionQuality <= mObjectPerceptionQualityThreshold) {
-            continue;
-        }
-
-        // get object type (A or B)
-        if (po.type == PerceivedObjectType::Unknown) {
-            EV_WARN << "perceived object type is unknown, skipping object";
-            continue;
-        }
-
-        auto histIt = mPerceivedObjectHistories.find(static_cast<int>(po.cpsId));
-        if (histIt != mPerceivedObjectHistories.end()) {
-            const PerceivedObjectHistory& history = histIt->second;
-            po.haveHistory = true;
-
-            // compute metrics for inclusion rules and utility function
-            po.sinceLastInclusionSeconds = (T_now - history.inclusion).dbl();
-            Position objectPos(static_cast<double>(po.xCm), static_cast<double>(po.yCm));
-            po.distanceDiffM = distance(objectPos, history.position).value() / 100.0;
-            double objectSpeed = po.hasVelocity ? po.speedMps : 0.0;
-            po.speedDiffMps = std::abs(objectSpeed - history.speed);
-            double objectOrientation = po.hasVelocity ? po.headingDeg : 0.0;
-            po.orientationDiffDeg = std::abs(objectOrientation - history.orientation.degree());
-        }
-
-        // type A (VRU pedestrians/cyclists) inclusion rules
-        if (po.type == PerceivedObjectType::TypeA) {
-            // rule 1a: include type A if newly detected after last CPM generation event (new object)
-            // rule 1b: include all type A if global type A trigger is active
-            if (includeAllTypeA) {  // triggered by at least one new type A or at least one type A aged beyond T_GenCpmMax/2
-                selected.push_back(idx);
-            }
-            continue;
-        }
-
-        // type B (vehicles/motorcycles) inclusion rules
-        if (po.haveHistory) {
-            // type B object with history: evaluate rules 2a-2e using the precomputed metrics
-            // rule 2a: include if newly detected after last CPM generation event (new object)
-            if (po.objectAgeMs < (T_now - mLastCpmTimestamp).dbl() * 1000) {
-                selected.push_back(idx);
-                continue;
-            }
-            // rule 2b: include if position change exceeds threshold
-            if (po.distanceDiffM > mMinPositionChangeThreshold.value()) {
-                selected.push_back(idx);
-                continue;
-            }
-            // rule 2c: include if speed change exceeds threshold
-            if (po.speedDiffMps > mMinGroundSpeedChangeThreshold.value()) {
-                selected.push_back(idx);
-                continue;
-            }
-            // rule 2d: include if orientation change exceeds threshold
-            if (po.orientationDiffDeg >= mMinGroundVelocityOrientationChangeThreshold.value()) {
-                selected.push_back(idx);
-                continue;
-            }
-            // rule 2e: include if time since last inclusion exceeds T_GenCpmMax
-            if (po.sinceLastInclusionSeconds >= mGenCpmMax.dbl()) {
-                selected.push_back(idx);
-                continue;
-            }
-        } else {  // type B object with no history (new object)
-            selected.push_back(idx);
-            continue;
-        }
-    }
-
-    mSelectedCpmObjects = std::move(selected);
-
-    if (mSelectedCpmObjects.empty()) {
-        return false;
-    }
-
-    // update history and compute utility per included object
-    for (const auto idx : mSelectedCpmObjects) {
-        auto& po = mPerceivedObjectSnapshot[idx];
-
-        // objects with prior inclusion history already carry cached delta metrics, while objects without history (newly detected) have zeros in the delta
-        // metrics
-        po.utility = calculateUtilityFunction(po, po.distanceDiffM, po.speedDiffMps, po.orientationDiffDeg, po.sinceLastInclusionSeconds);
-
+        po.utility = 1.0;
         mPerceivedObjectHistories[static_cast<int>(po.cpsId)] = PerceivedObjectHistory{
             T_now, Position(static_cast<double>(po.xCm), static_cast<double>(po.yCm)), (po.hasVelocity ? po.speedMps : 0.0),
             Angle((po.hasVelocity ? po.headingDeg : 0.0) * M_PI / 180.0)};
