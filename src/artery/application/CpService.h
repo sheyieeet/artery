@@ -109,8 +109,10 @@ public:
     void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
     void trigger() override;
     void receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details) override;
+    void handleMessage(omnetpp::cMessage* msg) override;
 
 private:
+    omnetpp::cMessage* mBaselineTimer = nullptr;
 
 	struct RsuTrackedObstacle {
 		 long id;                        

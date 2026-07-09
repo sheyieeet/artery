@@ -158,6 +158,9 @@ CpService::~CpService()
             findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
         } catch (...) {}
     }
+    if (mBaselineTimer) {
+        cancelAndDelete(mBaselineTimer);
+    }
 }
 
 void CpService::initialize()
@@ -231,6 +234,9 @@ void CpService::initialize()
     if (findHost()) {
         findHost()->subscribe(RadioDriverBase::ChannelLoadSignal, this);
     }
+
+    mBaselineTimer = new omnetpp::cMessage("Baseline10HzTimer");
+    scheduleAt(simTime() + 0.1, mBaselineTimer);
 }
 
 void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_ptr<vanetza::UpPacket> packet)
@@ -443,7 +449,17 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
 void CpService::trigger()
 {
     Enter_Method("trigger");
-    checkTriggeringConditions(simTime());
+    // checkTriggeringConditions(simTime());
+}
+
+void CpService::handleMessage(omnetpp::cMessage* msg)
+{
+    if (msg == mBaselineTimer) {
+        scheduleAt(simTime() + 0.1, mBaselineTimer);
+        sendCpm(simTime());
+    } else {
+        omnetpp::cSimpleModule::handleMessage(msg);
+    }
 }
 
 void CpService::checkTriggeringConditions(const SimTime& T_now)
@@ -558,22 +574,10 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
 {
     omnetpp::SimTime t_now = simTime();
 
-    // hyperparameters
-    const double tau = 0.5;
-    const double k = 1.0;
-    const double m_param = 5.0;
-    const double t_critical = 2.5;
-    const double mu = 0.34;
-    const double g = 9.81;
-    const double D_max = 100.0;
-
-// rsu and ego vehicle information
     double rsuGlobalX = mVehicleDataProvider ? mVehicleDataProvider->position().x.value() : 0.0;
     double rsuGlobalY = mVehicleDataProvider ? mVehicleDataProvider->position().y.value() : 0.0;
 
     veins::Coord egoPos(0, 0, 0);
-    double ego_v = 0.0;
-    double egoAngleRad = 0.0;
 
     auto* idRegistryMod = omnetpp::getSimulation()->getModuleByPath("idRegistry");
     auto* idRegistry = dynamic_cast<IdentityRegistry*>(idRegistryMod);
@@ -587,106 +591,54 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
                 if (vdp) {
                     egoPos.x = vdp->position().x.value();
                     egoPos.y = vdp->position().y.value();
-                    ego_v = vdp->speed().value();
-                    // Convert native heading (degrees) to Radians
-                    egoAngleRad = vdp->heading().value() * (M_PI / 180.0);
                 }
             }
         }
     }
 
-    double ego_vx = ego_v * std::sin(egoAngleRad);
-    double ego_vy = ego_v * std::cos(egoAngleRad);
-
     std::vector<CpService::PerceivedObjectSnapshot> selectedSnapshots;
     std::vector<std::size_t> selectedIndices;
     size_t localIndex = 0;
 
-    // Create Spatial Grid Map
-    std::map<std::pair<int, int>, std::vector<RsuTrackedObstacle>> spatialGrid;
-    
+    std::vector<std::pair<double, RsuTrackedObstacle>> distanceList;
+
     for (const auto& pair : mGlobalObstaclesList) {
         const auto& target = pair.second;
-        int g_x = std::floor(target.x / D_max);
-        int g_y = std::floor(target.y / D_max);
-        spatialGrid[{g_x, g_y}].push_back(target);
+        double dx = egoPos.x - target.x;
+        double dy = egoPos.y - target.y;
+        double D_squared = (dx * dx) + (dy * dy);
+        
+        distanceList.push_back({D_squared, target});
     }
 
-    int ego_grid_x = std::floor(egoPos.x / D_max);
-    int ego_grid_y = std::floor(egoPos.y / D_max);
+    // Sort by distance (closest first)
+    std::sort(distanceList.begin(), distanceList.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
 
-    for (int i = -1; i <= 1; i++) {
-        for (int j = -1; j <= 1; j++) {
-            auto cell_it = spatialGrid.find({ego_grid_x + i, ego_grid_y + j});
-            
-            if (cell_it != spatialGrid.end()) {
-                for (const auto& target : cell_it->second) {
-                    
-                    double dx = egoPos.x - target.x;
-                    double dy = egoPos.y - target.y;
-                    double D_squared = (dx * dx) + (dy * dy);
-                    
-                    // skip if object is far
-                    if (D_squared > (D_max * D_max)) {
-                        continue;
-                    }
+    // Select ONLY the top 10 closest objects
+    int count = 0;
+    for (const auto& item : distanceList) {
+        if (count >= 10) break;
+        const auto& target = item.second;
+        
+        CpService::PerceivedObjectSnapshot snap;
+        snap.cpsId = target.id;
+        
+        double relToRsuX = target.x - rsuGlobalX;
+        double relToRsuY = target.y - rsuGlobalY;
 
-                    double targetAngleRad = target.heading * M_PI / 180.0;
-                    double target_vx = target.speed * std::sin(targetAngleRad);
-                    double target_vy = target.speed * std::cos(targetAngleRad);
+        snap.xCm = std::round(relToRsuX * 100.0); 
+        snap.yCm = std::round(relToRsuY * 100.0);
+        snap.objectAgeMs = (t_now - target.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
+        snap.objectPerceptionQuality = std::clamp(static_cast<long>(target.reliabilityRatio * 7), 1L, 7L);
+        snap.hasVelocity = true;
+        snap.speedMps = target.speed;
+        snap.headingDeg = target.heading;
 
-                    double dvx = ego_vx - target_vx;
-                    double dvy = ego_vy - target_vy;
-                    
-                    double dot_product = (dx * dvx) + (dy * dvy);
-                    double v_rel_sq = (dvx * dvx) + (dvy * dvy);
-                    
-                    // Distance Risk Assessment
-                    double TTCE = 0.0;
-                    
-                    // Time To Closest Encounter
-                    if (v_rel_sq > 0.0001) {
-                        double t_min = -dot_product / v_rel_sq;
-                        TTCE = std::max(0.0, t_min);
-                    }
-
-                    // DCE (Distance to Closest Encounter)
-                    double dce_x = dx + (dvx * TTCE);
-                    double dce_y = dy + (dvy * TTCE);
-                    double DCE = std::sqrt((dce_x * dce_x) + (dce_y * dce_y));
-                    
-                    // safe distance for brake
-                    double d_safe = (ego_v * t_critical) + ((ego_v * ego_v) / (2 * mu * g));
-                    double risk_D = 1.0 / (1.0 + std::exp(k * (DCE - d_safe)));
-                    
-                    if (risk_D < tau) {
-                        continue;
-                    }
-                    
-                    // Time Risk Assessment
-                    double risk_T = 1.0 / (1.0 + std::exp(m_param * (TTCE - t_critical)));
-                    
-                    // Inclusion
-                    if (risk_D >= tau && risk_T >= tau) {
-                        // I_Edge = 1, add to downlink
-                        CpService::PerceivedObjectSnapshot snap;
-                        snap.cpsId = target.id;
-                        
-                        double relToRsuX = target.x - rsuGlobalX;
-                        double relToRsuY = target.y - rsuGlobalY;
-
-                        snap.xCm = std::round(relToRsuX * 100.0); 
-                        snap.yCm = std::round(relToRsuY * 100.0);
-                        snap.objectAgeMs = (t_now - target.lastUpdateTime).inUnit(omnetpp::SIMTIME_MS);
-                        snap.objectPerceptionQuality = std::clamp(static_cast<long>(target.reliabilityRatio * 7), 1L, 7L);
-                        snap.hasVelocity = true;
-
-                        selectedSnapshots.push_back(snap);
-                        selectedIndices.push_back(localIndex++);
-                    }
-                } 
-            } 
-        } 
+        selectedSnapshots.push_back(snap);
+        selectedIndices.push_back(localIndex++);
+        count++;
     } 
 
     // geounicast
