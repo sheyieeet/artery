@@ -102,6 +102,16 @@ public:
         Angle orientation;
     };
 
+    struct ObjectState {
+        omnetpp::SimTime lastTxTime = omnetpp::SimTime::ZERO;
+        double lastTxX = 0.0;
+        double lastTxY = 0.0;
+        double lastTxSpeed = 0.0;
+    };
+
+    std::map<long, ObjectState> mObjectTxStates;
+    omnetpp::cMessage* mCpmTimer = nullptr;
+
     CpService();
     ~CpService() override;
     void initialize() override;
@@ -109,6 +119,7 @@ public:
     void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
     void trigger() override;
     void receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details) override;
+    void handleMessage(omnetpp::cMessage* msg) override;
 
 private:
 
@@ -125,7 +136,7 @@ private:
     
     void checkTriggeringConditions(const omnetpp::SimTime& T_now);
     void sendCpm(const omnetpp::SimTime& T_now);
-    void sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind);
+    void sendSelectedLink();
     void captureVdpSnapshot();
     void captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors);
     ObjectVdpSnapshotMap captureObjectVdpSnapshot(const LocalEnvironmentModel::TrackedObjects& objects) const;
