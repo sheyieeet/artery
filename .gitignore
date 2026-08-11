@@ -42,3 +42,4 @@ __pycache__/
 .venv
 scenarios/rsu_grid/env/
 *.csv
+env/
