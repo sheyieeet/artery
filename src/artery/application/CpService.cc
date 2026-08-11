@@ -645,17 +645,11 @@ void CpService::sendSelectedLink()
         payload->layer(OsiLayer::Application) = std::move(buffer);
         this->request(request, std::move(payload));
 
-<<<<<<< HEAD
-        double txInterval = (t_now - mLastTxTimestamp).dbl();
-        if (txInterval > 0) {
-            double txThroughput = (txSize * 8.0) / txInterval; // bits per second
-=======
         // Log TX CPM metrics
         mAccumulatedTxBytes += txSize;
         double txInterval = (t_now - mLastTxThroughputTime).dbl();
         if (txInterval >= 1.0) {
             double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
->>>>>>> fyp
             emit(scSignalCpmTxThroughput, txThroughput);
             writeMetricToCsv("TX_Throughput", txThroughput);
             mLastTxThroughputTime = t_now;
