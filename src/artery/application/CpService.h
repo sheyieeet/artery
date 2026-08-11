@@ -196,10 +196,12 @@ private:
     std::vector<SensorSnapshot> mSensorSnapshot;
 
     // Custom metrics logging fields & helpers
-    omnetpp::SimTime mLastTxTimestamp = omnetpp::SimTime::ZERO;
-    omnetpp::SimTime mLastRxTimestamp = omnetpp::SimTime::ZERO;
+    omnetpp::SimTime mLastTxThroughputTime = omnetpp::SimTime::ZERO;
+    size_t mAccumulatedTxBytes = 0;
+    omnetpp::SimTime mLastRxThroughputTime = omnetpp::SimTime::ZERO;
+    size_t mAccumulatedRxBytes = 0;
     double mLastChannelLoad = 0.0;
-    std::unordered_map<long, omnetpp::SimTime> mRxObjectLastUpdateTime;
+    std::unordered_map<uint64_t, omnetpp::SimTime> mRxObjectLastUpdateTime;
     void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
 };
 
