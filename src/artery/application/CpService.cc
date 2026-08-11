@@ -227,8 +227,10 @@ void CpService::initialize()
     const auto stationType = mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU;
 
     // Initialize custom metrics tracking fields
-    mLastTxTimestamp = simTime();
-    mLastRxTimestamp = simTime();
+    mLastTxThroughputTime = simTime();
+    mAccumulatedTxBytes = 0;
+    mLastRxThroughputTime = simTime();
+    mAccumulatedRxBytes = 0;
     mLastChannelLoad = 0.0;
     mRxObjectLastUpdateTime.clear();
 
@@ -272,13 +274,14 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                         objId = *(po->objectId);
                     }
                     
-                    auto it = mRxObjectLastUpdateTime.find(objId);
+                    uint64_t globalObjId = (static_cast<uint64_t>((**cpm).header.stationId) << 32) | static_cast<uint32_t>(objId);
+                    auto it = mRxObjectLastUpdateTime.find(globalObjId);
                     if (it != mRxObjectLastUpdateTime.end()) {
                         omnetpp::SimTime timeDiff = simTime() - it->second;
                         emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
                         writeMetricToCsv("Object_UpdateInterval", timeDiff.dbl(), objId);
                     }
-                    mRxObjectLastUpdateTime[objId] = simTime();
+                    mRxObjectLastUpdateTime[globalObjId] = simTime();
                 }
             } else if (container->containerId == Vanetza_ITS2_CpmContainerId_sensorInformationContainer) {
                 auto& sic = container->containerData.choice.SensorInformationContainer;
@@ -306,13 +309,15 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
             rxSize += 5 + 35 * numRxObjects;
         }
 
-        double rxInterval = (simTime() - mLastRxTimestamp).dbl();
-        if (rxInterval > 0) {
-            double rxThroughput = (rxSize * 8.0) / rxInterval; // bits per second
+        mAccumulatedRxBytes += rxSize;
+        double rxInterval = (simTime() - mLastRxThroughputTime).dbl();
+        if (rxInterval >= 1.0) {
+            double rxThroughput = (mAccumulatedRxBytes * 8.0) / rxInterval; // bits per second
             emit(scSignalCpmRxThroughput, rxThroughput);
             writeMetricToCsv("RX_Throughput", rxThroughput);
+            mLastRxThroughputTime = simTime();
+            mAccumulatedRxBytes = 0;
         }
-        mLastRxTimestamp = simTime();
 
         emit(scSignalCpmRxObjectCount, (long)numRxObjects);
         writeMetricToCsv("RX_ObjectCount", numRxObjects);
@@ -406,8 +411,8 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                         mGlobalObstaclesList[objId].x = globalX;
                         mGlobalObstaclesList[objId].y = globalY;
                         mGlobalObstaclesList[objId].lastUpdateTime = t_now;
-                        mGlobalObstaclesList[objId].speed = obsSpeed;     // Ensure we update speed 
-                        mGlobalObstaclesList[objId].heading = obsHeading; // Ensure we update heading
+                        mGlobalObstaclesList[objId].speed = obsSpeed;
+                        mGlobalObstaclesList[objId].heading = obsHeading;
                     }
                 }
             }
@@ -558,13 +563,15 @@ void CpService::sendCpm(const SimTime& T_now)
     this->request(request, std::move(payload));
 
     // Log TX CPM metrics
-    double txInterval = (T_now - mLastTxTimestamp).dbl();
-    if (txInterval > 0) {
-        double txThroughput = (txSize * 8.0) / txInterval; // bits per second
+    mAccumulatedTxBytes += txSize;
+    double txInterval = (T_now - mLastTxThroughputTime).dbl();
+    if (txInterval >= 1.0) {
+        double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
         emit(scSignalCpmTxThroughput, txThroughput);
         writeMetricToCsv("TX_Throughput", txThroughput);
+        mLastTxThroughputTime = T_now;
+        mAccumulatedTxBytes = 0;
     }
-    mLastTxTimestamp = T_now;
 
     size_t numTxObjects = includeObjects ? mSelectedCpmObjects.size() : 0;
     emit(scSignalCpmTxObjectCount, (long)numTxObjects);
@@ -671,13 +678,15 @@ void CpService::sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::D
         this->request(request, std::move(payload));
 
         // Log TX CPM metrics
-        double txInterval = (t_now - mLastTxTimestamp).dbl();
-        if (txInterval > 0) {
-            double txThroughput = (txSize * 8.0) / txInterval; // bits per second
+        mAccumulatedTxBytes += txSize;
+        double txInterval = (t_now - mLastTxThroughputTime).dbl();
+        if (txInterval >= 1.0) {
+            double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
             emit(scSignalCpmTxThroughput, txThroughput);
             writeMetricToCsv("TX_Throughput", txThroughput);
+            mLastTxThroughputTime = t_now;
+            mAccumulatedTxBytes = 0;
         }
-        mLastTxTimestamp = t_now;
 
         size_t numTxObjects = selectedSnapshots.size();
         emit(scSignalCpmTxObjectCount, (long)numTxObjects);
