@@ -11,6 +11,7 @@
 #include "artery/application/VehicleDataProvider.h"
 #include "artery/envmod/TraCIEnvironmentModelObject.h"
 #include "artery/envmod/sensor/FovSensor.h"
+#include "artery/utility/Identity.h"
 #include "artery/utility/round.h"
 #include "artery/utility/simtime_cast.h"
 #include "veins/base/utils/Coord.h"
@@ -25,6 +26,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <mutex>
+
+#include "artery/nic/RadioDriverBase.h"
 
 namespace artery
 {
@@ -33,6 +38,12 @@ using namespace omnetpp;
 
 static const simsignal_t scSignalCpmReceived = cComponent::registerSignal("CpmReceived");
 static const simsignal_t scSignalCpmSent = cComponent::registerSignal("CpmSent");
+static const simsignal_t scSignalCpmTxThroughput = cComponent::registerSignal("CpmTxThroughput");
+static const simsignal_t scSignalCpmRxThroughput = cComponent::registerSignal("CpmRxThroughput");
+static const simsignal_t scSignalCpmChannelLoad = cComponent::registerSignal("CpmChannelLoad");
+static const simsignal_t scSignalCpmTxObjectCount = cComponent::registerSignal("CpmTxObjectCount");
+static const simsignal_t scSignalCpmRxObjectCount = cComponent::registerSignal("CpmRxObjectCount");
+static const simsignal_t scSignalCpmObjectUpdateInterval = cComponent::registerSignal("CpmObjectUpdateInterval");
 
 // CPM object/sensor ID allocation constants
 static constexpr std::size_t kCpmObjectIdSpace = 65536;
@@ -136,6 +147,10 @@ CpService::CpService() : mGenCpmMin{100, SIMTIME_MS}, mGenCpmMax{1000, SIMTIME_M
 {
 }
 
+CpService::~CpService()
+{
+}
+
 void CpService::initialize()
 {
     ItsG5BaseService::initialize();
@@ -188,13 +203,23 @@ void CpService::initialize()
     mSensorId2Cps.clear();
     mCps2SensorId.assign(kCpmSensorIdSpace, kInvalidLemSensorId);
     mCpmSensorIdLastUsed.assign(kCpmSensorIdSpace, kNeverUsedSimTime);
+    mSensorSnapshot.clear();
+
+    mLastTxThroughputTime = simTime();
+    mLastRxThroughputTime = simTime();
+    mLastChannelLoad = 0.0;
+    if (findHost()) {
+        findHost()->subscribe(RadioDriverBase::ChannelLoadSignal, this);
+    }
 
     mDccRestriction = par("withDccRestriction");
 
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
 
-    const auto stationType = mVehicleDataProvider->getStationType();
+    if (mVehicleDataProvider) {
+        const auto stationType = mVehicleDataProvider->getStationType();
+    }
 }
 
 void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_ptr<vanetza::UpPacket> packet)
@@ -205,6 +230,96 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
     const Cpm* cpm = boost::apply_visitor(visitor, *packet);
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper;
+        
+        size_t rxSize = boost::size(*packet);
+        mAccumulatedRxBytes += rxSize;
+
+        const Vanetza_ITS2_CpmPayload_t& payload = (*cpm)->payload;
+        const Vanetza_ITS2_CPM_PDU_Descriptions_ManagementContainer_t& mc = payload.managementContainer;
+        
+        size_t numRxObjects = 0;
+
+        // record received objects in history if suppression is enabled
+        if (mRedundancySuppressionMode > 0) {
+            double senderLat = static_cast<double>(mc.referencePosition.latitude);
+            double senderLon = static_cast<double>(mc.referencePosition.longitude);
+            // use our most recent VDP snapshot (captured at last CPM generation or initialized)
+            if (mVdpSnapshot.referenceLatitude == 0) {
+                captureVdpSnapshot();
+            }
+            double receiverLat = static_cast<double>(mVdpSnapshot.referenceLatitude);
+            double receiverLon = static_cast<double>(mVdpSnapshot.referenceLongitude);
+            
+            double latDiffMeters = (senderLat - receiverLat) * 0.011132;
+            double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
+            double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
+            
+            for (int i = 0; i < payload.cpmContainers.list.count; ++i) {
+                Vanetza_ITS2_WrappedCpmContainer_t* wcc = payload.cpmContainers.list.array[i];
+                if (wcc->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
+                    Vanetza_ITS2_PerceivedObjectContainer_t& poc = wcc->containerData.choice.PerceivedObjectContainer;
+                    numRxObjects = poc.perceivedObjects.list.count;
+                    for (int j = 0; j < poc.perceivedObjects.list.count; ++j) {
+                        Vanetza_ITS2_PerceivedObject_t* po = poc.perceivedObjects.list.array[j];
+                        
+                        double objDx = static_cast<double>(po->position.xCoordinate.value) / 100.0;
+                        double objDy = static_cast<double>(po->position.yCoordinate.value) / 100.0;
+                        
+                        Position historyPos(
+                            mVdpSnapshot.position.x.value() + lonDiffMeters + objDx, 
+                            mVdpSnapshot.position.y.value() - latDiffMeters + objDy
+                        );
+                        
+                        mReceivedObjectsHistory.push_back(ReceivedObjectHistory{simTime(), historyPos});
+
+                        // Track object update intervals
+                        long objId = po->objectId ? *(po->objectId) : 0;
+                        auto it = mRxObjectLastUpdateTime.find(objId);
+                        if (it != mRxObjectLastUpdateTime.end()) {
+                            omnetpp::SimTime timeDiff = simTime() - it->second;
+                            emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
+                            writeMetricToCsv("Object_UpdateInterval", timeDiff.dbl(), objId);
+                        }
+                        mRxObjectLastUpdateTime[objId] = simTime();
+                    }
+                }
+            }
+        } else {
+            // just count objects for metrics if redundancy suppression is disabled
+            for (int i = 0; i < payload.cpmContainers.list.count; ++i) {
+                Vanetza_ITS2_WrappedCpmContainer_t* wcc = payload.cpmContainers.list.array[i];
+                if (wcc->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
+                    Vanetza_ITS2_PerceivedObjectContainer_t& poc = wcc->containerData.choice.PerceivedObjectContainer;
+                    numRxObjects = poc.perceivedObjects.list.count;
+                    
+                    // Track object update intervals
+                    for (int j = 0; j < poc.perceivedObjects.list.count; ++j) {
+                        Vanetza_ITS2_PerceivedObject_t* po = poc.perceivedObjects.list.array[j];
+                        long objId = po->objectId ? *(po->objectId) : 0;
+                        auto it = mRxObjectLastUpdateTime.find(objId);
+                        if (it != mRxObjectLastUpdateTime.end()) {
+                            omnetpp::SimTime timeDiff = simTime() - it->second;
+                            emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
+                            writeMetricToCsv("Object_UpdateInterval", timeDiff.dbl(), objId);
+                        }
+                        mRxObjectLastUpdateTime[objId] = simTime();
+                    }
+                }
+            }
+        }
+        
+        double rxInterval = (simTime() - mLastRxThroughputTime).dbl();
+        if (rxInterval >= 1.0) {
+            double rxThroughput = (mAccumulatedRxBytes * 8.0) / rxInterval; // bits per second
+            emit(scSignalCpmRxThroughput, rxThroughput);
+            writeMetricToCsv("RX_Throughput", rxThroughput);
+            mLastRxThroughputTime = simTime();
+            mAccumulatedRxBytes = 0;
+        }
+
+        emit(scSignalCpmRxObjectCount, (long)numRxObjects);
+        writeMetricToCsv("RX_ObjectCount", numRxObjects);
+        
         emit(scSignalCpmReceived, &obj);
     }
 }
@@ -290,18 +405,54 @@ void CpService::sendCpm(const SimTime& T_now)
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
     payload->layer(OsiLayer::Application) = std::move(buffer);
+    
+    // Store size before passing payload
+    size_t txSize = payload->size();
     this->request(request, std::move(payload));
+
+    // Log TX CPM metrics
+    mAccumulatedTxBytes += txSize;
+    double txInterval = (T_now - mLastTxThroughputTime).dbl();
+    if (txInterval >= 1.0) {
+        double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
+        emit(scSignalCpmTxThroughput, txThroughput);
+        writeMetricToCsv("TX_Throughput", txThroughput);
+        mLastTxThroughputTime = T_now;
+        mAccumulatedTxBytes = 0;
+    }
+
+    size_t numTxObjects = mSelectedCpmObjects.size();
+    emit(scSignalCpmTxObjectCount, (long)numTxObjects);
+    writeMetricToCsv("TX_ObjectCount", numTxObjects);
 }
 
 void CpService::captureVdpSnapshot()
 {
-    mVdpSnapshot.updated = mVehicleDataProvider->updated();
-    mVdpSnapshot.stationId = static_cast<uint32_t>(mVehicleDataProvider->getStationId());
-    mVdpSnapshot.stationType = static_cast<int>(mVehicleDataProvider->getStationType());
-    mVdpSnapshot.position = mVehicleDataProvider->position();
-    mVdpSnapshot.referenceLatitude = round(mVehicleDataProvider->latitude(), vanetza::units::degree * boost::units::si::micro) * 10;
-    mVdpSnapshot.referenceLongitude = round(mVehicleDataProvider->longitude(), vanetza::units::degree * boost::units::si::micro) * 10;
-    mVdpSnapshot.orientationAngleDeciDeg = round(mVehicleDataProvider->heading(), vanetza::units::degree * boost::units::si::deci);
+    if (mVehicleDataProvider) {
+        mVdpSnapshot.updated = mVehicleDataProvider->updated();
+        mVdpSnapshot.stationId = static_cast<uint32_t>(mVehicleDataProvider->getStationId());
+        mVdpSnapshot.stationType = static_cast<int>(mVehicleDataProvider->getStationType());
+        mVdpSnapshot.position = mVehicleDataProvider->position();
+        mVdpSnapshot.referenceLatitude = round(mVehicleDataProvider->latitude(), vanetza::units::degree * boost::units::si::micro) * 10;
+        mVdpSnapshot.referenceLongitude = round(mVehicleDataProvider->longitude(), vanetza::units::degree * boost::units::si::micro) * 10;
+        mVdpSnapshot.orientationAngleDeciDeg = round(mVehicleDataProvider->heading(), vanetza::units::degree * boost::units::si::deci);
+    } else {
+        auto geoPosition = getFacilities().get_const_ptr<GeoPosition>();
+        auto identity = getFacilities().get_const_ptr<Identity>();
+
+        if (geoPosition) {
+            mVdpSnapshot.referenceLatitude = std::round((geoPosition->latitude / vanetza::units::degree) * 1e7);
+            mVdpSnapshot.referenceLongitude = std::round((geoPosition->longitude / vanetza::units::degree) * 1e7);
+        } else {
+            mVdpSnapshot.referenceLatitude = 900000001; // unavailable
+            mVdpSnapshot.referenceLongitude = 1800000001; // unavailable
+        }
+
+        mVdpSnapshot.updated = simTime();
+        mVdpSnapshot.stationId = identity ? identity->application : 0;
+        mVdpSnapshot.stationType = static_cast<int>(vanetza::geonet::StationType::RSU);
+        mVdpSnapshot.orientationAngleDeciDeg = 36001; // unavailable
+    }
 }
 
 void CpService::captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors)
@@ -1072,5 +1223,64 @@ void addPerceivedObjectContainer(
     }
 }
 
+
+void CpService::finish()
+{
+    if (findHost()) {
+        findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
+    }
+    ItsG5BaseService::finish();
+}
+
+void CpService::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details)
+{
+    if (signal == RadioDriverBase::ChannelLoadSignal) {
+        ASSERT(value >= 0.0 && value <= 1.0);
+        mLastChannelLoad = value;
+        emit(scSignalCpmChannelLoad, value);
+        writeMetricToCsv("ChannelLoad", value);
+    }
+}
+
+void CpService::writeMetricToCsv(const std::string& metricType, double value, long objectId)
+{
+    static std::mutex csvMutex;
+    static std::ofstream outfile;
+
+    std::lock_guard<std::mutex> lock(csvMutex);
+
+    if (!outfile.is_open()) {
+        std::string filename = "cpm_metrics.csv";
+        bool fileExists = false;
+        {
+            std::ifstream infile(filename);
+            if (infile.good()) {
+                fileExists = true;
+            }
+        }
+        outfile.open(filename, std::ios_base::app);
+        if (!fileExists) {
+            outfile << "Timestamp,StationID,StationType,Metric,Value,ObjectID\n";
+        }
+    }
+
+    std::string stationTypeStr = "Unknown";
+    if (mVehicleDataProvider) {
+        using vanetza::geonet::StationType;
+        StationType st = mVehicleDataProvider->getStationType();
+        if (st == StationType::RSU) {
+            stationTypeStr = "RSU";
+        } else {
+            stationTypeStr = "Vehicle";
+        }
+    }
+    outfile << simTime().dbl() << ","
+            << (mVehicleDataProvider ? mVehicleDataProvider->getStationId() : 0) << ","
+            << stationTypeStr << ","
+            << metricType << ","
+            << value << ","
+            << objectId << "\n";
+    outfile.flush();
+}
 
 }  // namespace artery

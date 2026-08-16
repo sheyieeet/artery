@@ -22,6 +22,7 @@
 #include <optional>
 #include <unordered_map>
 #include <vector>
+#include <string>
 
 namespace artery
 {
@@ -101,8 +102,16 @@ public:
         Angle orientation;
     };
 
+    struct ReceivedObjectHistory {
+        omnetpp::SimTime time;
+        Position position;
+    };
+
     CpService();
+    ~CpService() override;
     void initialize() override;
+    void finish() override;
+    void receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details) override;
     void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
     void trigger() override;
 
@@ -157,6 +166,12 @@ private:
     vanetza::units::Angle mMaxGroundVelocityOrientationChangePriorityThreshold;
     omnetpp::SimTime mMinLastInclusionTimePriorityThreshold;
     omnetpp::SimTime mMaxLastInclusionTimePriorityThreshold;
+    
+    int mRedundancySuppressionMode;
+    vanetza::units::Length mRedundancyDistanceThreshold;
+    omnetpp::SimTime mRedundancyHistoryLifetime;
+    std::vector<ReceivedObjectHistory> mReceivedObjectsHistory;
+
     std::vector<std::size_t> mSelectedCpmObjects;  // indices into mPerceivedObjectSnapshot
 
     // CPM object ID allocation. ETSI TS 103 324 (0..65535, reuse holdoff, reset on pseudonym change)
@@ -168,6 +183,7 @@ private:
     std::vector<omnetpp::SimTime> mCpmObjectIdLastUsed;
     std::vector<int64_t> mCpmObjectIdLastAgeMs;
     std::vector<PerceivedObjectSnapshot> mPerceivedObjectSnapshot;
+    std::vector<PerceivedObjectSnapshot> mReceivedPerceivedObjectSnapshot;
 
     // CPM sensorId allocation. ETSI TS 103 324 (0..255, stable mapping, reuse holdoff, reset on pseudonym change)
     omnetpp::SimTime mUnusedSensorIdRetentionPeriod;
@@ -175,6 +191,15 @@ private:
     std::vector<int> mCps2SensorId;  // cpsId -> LEM sensorId, kInvalidLemSensorId if not in use
     std::vector<omnetpp::SimTime> mCpmSensorIdLastUsed;
     std::vector<SensorSnapshot> mSensorSnapshot;
+
+    // Custom metrics logging fields
+    omnetpp::SimTime mLastTxThroughputTime = omnetpp::SimTime::ZERO;
+    size_t mAccumulatedTxBytes = 0;
+    omnetpp::SimTime mLastRxThroughputTime = omnetpp::SimTime::ZERO;
+    size_t mAccumulatedRxBytes = 0;
+    double mLastChannelLoad = 0.0;
+    std::unordered_map<uint64_t, omnetpp::SimTime> mRxObjectLastUpdateTime;
+    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
 };
 
 Cpm createCollectivePerceptionMessage(const CpService::VdpSnapshot& vdp, uint64_t referenceTime);
