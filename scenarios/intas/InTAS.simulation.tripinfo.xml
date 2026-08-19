@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<!-- generated on 2026-08-20T00:39:11.102678+08:00 by Eclipse SUMO sumo 1.27.1
+<sumoConfiguration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
+
+    <input>
+        <net-file value="ingolstadt.net.xml"/>
+        <route-files value="routes/ped.rou.xml,routes/BusRoutes.flow.xml,routes/InTAS_001.rou.xml,routes/InTAS_002.rou.xml,routes/InTAS_003.rou.xml,routes/InTAS_004.rou.xml,routes/InTAS_005.rou.xml,routes/InTAS_006.rou.xml,routes/InTAS_007.rou.xml,routes/InTAS_008.rou.xml,routes/InTAS_009.rou.xml,routes/InTAS_010.rou.xml,routes/InTAS_011.rou.xml,routes/InTAS_012.rou.xml,routes/InTAS_013.rou.xml,routes/InTAS_014.rou.xml,routes/InTAS_015.rou.xml,routes/InTAS_016.rou.xml,routes/InTAS_017.rou.xml,routes/InTAS_018.rou.xml,routes/InTAS_019.rou.xml,routes/InTAS_020.rou.xml,routes/InTAS_021.rou.xml,routes/InTAS_022.rou.xml"/>
+        <additional-files value="BusStations.add.xml,InTAS_E1.add.xml,buildings.poly.xml"/>
+    </input>
+
+    <output>
+        <summary-output value="InTAS.simulation.summary.xml"/>
+        <tripinfo-output value="InTAS.simulation.tripinfo.xml"/>
+        <statistic-output value="InTAS.simulation.statistic.xml"/>
+    </output>
+
+    <time>
+        <begin value="0"/>
+        <end value="86400"/>
+        <step-length value="0.1"/>
+    </time>
+
+    <processing>
+        <threads value="1"/>
+        <route-steps value="200"/>
+        <ignore-junction-blocker value="15"/>
+        <time-to-teleport value="300"/>
+        <time-to-teleport.highways value="300"/>
+        <max-depart-delay value="300"/>
+        <default.carfollowmodel value="Krauss"/>
+        <parking.maneuver value="true"/>
+        <pedestrian.model value="striping"/>
+        <pedestrian.striping.stripe-width value="0.55"/>
+        <pedestrian.striping.jamtime value="30"/>
+    </processing>
+
+    <routing>
+        <routing-algorithm value="dijkstra"/>
+        <persontrip.transfer.car-walk value="allJunctions"/>
+        <device.rerouting.probability value="0.82"/>
+        <device.rerouting.explicit value="default_001,default_002,default_003,default_004,default_005,default_006,default_007,default_008,default_009,default_010,default_011,default_012,default_013,default_014,default_015,default_016,default_017,default_018,default_019,default_020,default_021,default_022,random_001,random_002,random_003,random_004,random_005,random_006,random_007,random_008,random_009,random_010,random_011,random_012,random_013,random_014,random_015,random_016,random_017,random_018,random_019,random_020,random_021,random_022"/>
+        <device.rerouting.period value="300"/>
+        <device.rerouting.threads value="1"/>
+        <device.rerouting.synchronize value="true"/>
+    </routing>
+
+    <report>
+        <verbose value="true"/>
+        <no-warnings value="true"/>
+        <log value="InTAS.simulation.log"/>
+        <message-log value="results/sumo-0.log"/>
+        <no-step-log value="true"/>
+    </report>
+
+    <traci_server>
+        <remote-port value="47137"/>
+    </traci_server>
+
+    <random_number>
+        <seed value="23423"/>
+    </random_number>
+
+    <gui_only>
+        <quit-on-end value="true"/>
+    </gui_only>
+
+</sumoConfiguration>
+-->
+
+<tripinfos xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/tripinfo_file.xsd">
+    <tripinfo id="h21950c1:1" depart="0.00" departLane="207091132#3_1" departPos="35.98" departSpeed="0.45" departDelay="0.00" arrival="0.10" arrivalLane="207091132#3_1" arrivalPos="35.98" arrivalSpeed="0.00" duration="0.10" routeLength="0.00" waitingTime="0.10" waitingCount="1" stopTime="0.00" timeLoss="0.10" rerouteNo="0" devices="tripinfo_h21950c1:1" vType="default_001" speedFactor="1.02" vaporized=""/>
+    <tripinfo id="carIn19028:1" depart="1.20" departLane="10881203_0" departPos="0.00" departSpeed="55.53" departDelay="1.20" arrival="78.10" arrivalLane="gneE119_1" arrivalPos="25.00" arrivalSpeed="1.05" duration="76.90" routeLength="3234.36" waitingTime="0.00" waitingCount="0" stopTime="0.00" timeLoss="4.15" rerouteNo="0" devices="tripinfo_carIn19028:1 routing_carIn19028:1" vType="default_001" speedFactor="0.94" vaporized=""/>
+    <tripinfo id="carIn46650:1" depart="3.60" departLane="10881203_0" departPos="0.00" departSpeed="55.50" departDelay="3.60" arrival="81.10" arrivalLane="gneE119_1" arrivalPos="25.00" arrivalSpeed="0.75" duration="77.50" routeLength="3234.36" waitingTime="0.00" waitingCount="0" stopTime="0.00" timeLoss="8.43" rerouteNo="0" devices="tripinfo_carIn46650:1 routing_carIn46650:1" vType="default_001" speedFactor="1.13" vaporized=""/>
+    <tripinfo id="carIn21792:1" depart="0.00" departLane="10881203_1" departPos="0.00" departSpeed="55.56" departDelay="0.00" arrival="116.00" arrivalLane="306793670#1_0" arrivalPos="0.00" arrivalSpeed="0.00" duration="116.00" routeLength="5489.86" waitingTime="0.20" waitingCount="1" stopTime="0.00" timeLoss="6.54" rerouteNo="0" devices="tripinfo_carIn21792:1 routing_carIn21792:1" vType="default_001" speedFactor="1.14" vaporized=""/>
+    <tripinfo id="carIn80851:1" depart="6.00" departLane="10881203_1" departPos="0.00" departSpeed="55.49" departDelay="6.00" arrival="125.80" arrivalLane="306793670#1_0" arrivalPos="0.00" arrivalSpeed="0.00" duration="119.80" routeLength="5489.86" waitingTime="0.20" waitingCount="1" stopTime="0.00" timeLoss="7.41" rerouteNo="0" devices="tripinfo_carIn80851:1" vType="default_001" speedFactor="1.00" vaporized=""/>
+    <tripinfo id="carIn18404:1" depart="0.00" departLane="221257620_2" departPos="0.00" departSpeed="55.56" departDelay="0.00" arrival="128.90" arrivalLane="221257625.1575_0" arrivalPos="0.00" arrivalSpeed="0.00" duration="128.90" routeLength="6800.92" waitingTime="0.20" waitingCount="1" stopTime="0.00" timeLoss="6.48" rerouteNo="0" devices="tripinfo_carIn18404:1 routing_carIn18404:1" vType="default_001" speedFactor="0.98" vaporized=""/>
+    <tripinfo id="carIn96498:1" depart="8.40" departLane="10881203_0" departPos="0.00" departSpeed="55.48" departDelay="8.40" arrival="135.60" arrivalLane="266507534_2" arrivalPos="728.45" arrivalSpeed="0.90" duration="127.20" routeLength="6524.66" waitingTime="0.00" waitingCount="0" stopTime="0.00" timeLoss="9.76" rerouteNo="0" devices="tripinfo_carIn96498:1" vType="default_001" speedFactor="1.06" vaporized=""/>
+    <tripinfo id="randUni22983:1" depart="52.00" departLane="-28269079#2_1" departPos="21.10" departSpeed="8.33" departDelay="0.00" arrival="137.90" arrivalLane="-26334886_1" arrivalPos="48.59" arrivalSpeed="1.05" duration="85.90" routeLength="769.44" waitingTime="0.00" waitingCount="0" stopTime="0.00" timeLoss="5.46" rerouteNo="0" devices="tripinfo_randUni22983:1" vType="random_001" speedFactor="1.05" vaporized=""/>
+    <tripinfo id="randUni5650:1" depart="16.00" departLane="90587321#0_1" departPos="5.96" departSpeed="6.87" departDelay="0.00" arrival="160.40" arrivalLane="64464420_1" arrivalPos="33.01" arrivalSpeed="1.06" duration="144.40" routeLength="935.33" waitingTime="72.20" waitingCount="2" stopTime="0.00" timeLoss="86.74" rerouteNo="0" devices="tripinfo_randUni5650:1 routing_randUni5650:1" vType="random_001" speedFactor="1.19" vaporized=""/>
+    <tripinfo id="carIn70444:1" depart="4.80" departLane="10881203_2" departPos="0.00" departSpeed="55.50" departDelay="4.80" arrival="167.50" arrivalLane="39704922_0" arrivalPos="0.00" arrivalSpeed="0.00" duration="162.70" routeLength="6213.26" waitingTime="0.30" waitingCount="1" stopTime="0.00" timeLoss="21.30" rerouteNo="0" devices="tripinfo_carIn70444:1 routing_carIn70444:1" vType="default_001" speedFactor="1.07" vaporized=""/>
+    <tripinfo id="carIn76422:1" depart="4.80" departLane="10881203_1" departPos="0.00" departSpeed="55.47" departDelay="4.80" arrival="173.90" arrivalLane="39704922_0" arrivalPos="0.00" arrivalSpeed="0.00" duration="169.10" routeLength="6213.26" waitingTime="0.30" waitingCount="1" stopTime="0.00" timeLoss="25.64" rerouteNo="0" devices="tripinfo_carIn76422:1 routing_carIn76422:1" vType="default_001" speedFactor="1.02" vaporized=""/>
+</tripinfos>
