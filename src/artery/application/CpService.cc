@@ -191,6 +191,10 @@ void CpService::initialize()
     mMinLastInclusionTimePriorityThreshold = par("minLastInclusionTimePriorityThreshold");
     mMaxLastInclusionTimePriorityThreshold = par("maxLastInclusionTimePriorityThreshold");
 
+    mRedundancySuppressionMode = par("redundancySuppressionMode");
+    mRedundancyDistanceThreshold = par("redundancyDistanceThreshold").doubleValue() * vanetza::units::si::meter;
+    mRedundancyHistoryLifetime = par("redundancyHistoryLifetime");
+
     mUnusedObjectIdRetentionPeriod = par("unusedObjectIdRetentionPeriod");
     mHaveStationId = false;
     mLastStationId = 0;
@@ -651,6 +655,15 @@ bool CpService::checkPerceptionRegionTrigger()
 
 bool CpService::checkPerceivedObjectTrigger(const SimTime& T_now)
 {
+    if (mRedundancySuppressionMode > 0) {
+        mReceivedObjectsHistory.erase(
+            std::remove_if(mReceivedObjectsHistory.begin(), mReceivedObjectsHistory.end(),
+                [&](const ReceivedObjectHistory& h) {
+                    return (T_now - h.time) > mRedundancyHistoryLifetime;
+                }),
+            mReceivedObjectsHistory.end());
+    }
+
     if (mObjectInclusionConfig == 0) {
         // include all perceived objects by default (up to the CPM capacity)
         return !mPerceivedObjectSnapshot.empty();
@@ -775,6 +788,40 @@ bool CpService::checkPerceivedObjectTrigger(const SimTime& T_now)
     }
 
     mSelectedCpmObjects = std::move(selected);
+
+    // Apply redundancy suppression
+    if (mRedundancySuppressionMode > 0 && !mSelectedCpmObjects.empty()) {
+        std::vector<std::size_t> redundancyFiltered;
+        redundancyFiltered.reserve(mSelectedCpmObjects.size());
+        
+        for (auto idx : mSelectedCpmObjects) {
+            auto& po = mPerceivedObjectSnapshot[idx];
+            
+            // Calculate absolute position of the perceived object
+            Position objectPos(mVdpSnapshot.position.x.value() + static_cast<double>(po.xCm) / 100.0,
+                               mVdpSnapshot.position.y.value() + static_cast<double>(po.yCm) / 100.0);
+            
+            bool isRedundant = false;
+            for (const auto& rh : mReceivedObjectsHistory) {
+                if (distance(objectPos, rh.position).value() <= mRedundancyDistanceThreshold.value()) {
+                    isRedundant = true;
+                    break;
+                }
+            }
+            
+            if (!isRedundant) {
+                redundancyFiltered.push_back(idx);
+            }
+        }
+        
+        if (mRedundancySuppressionMode == 1) { // all: suppress CPM only if ALL objects are redundant
+            if (redundancyFiltered.empty()) {
+                mSelectedCpmObjects.clear();
+            }
+        } else if (mRedundancySuppressionMode == 2) { // any: suppress ANY redundant object (Object-Level)
+            mSelectedCpmObjects = std::move(redundancyFiltered);
+        }
+    }
 
     if (mSelectedCpmObjects.empty()) {
         return false;

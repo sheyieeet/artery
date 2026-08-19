@@ -52,5 +52,5 @@ simple CpService like ItsG5Service
         // redundancy mitigation parameters
         int redundancySuppressionMode @enum(0,1,2) = default(1); // 0: disabled, 1: all, 2: any
         double redundancyDistanceThreshold @unit(m) = default(1.0m);
-        double redundancyHistoryLifetime @unit(s) = default(1.0s);
+        double redundancyHistoryLifetime @unit(s) = default(0.1s);
 }
