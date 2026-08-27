@@ -199,7 +199,6 @@ private:
     size_t mAccumulatedRxBytes = 0;
     double mLastChannelLoad = 0.0;
     std::unordered_map<uint64_t, omnetpp::SimTime> mRxObjectLastUpdateTime;
-    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
 };
 
 Cpm createCollectivePerceptionMessage(const CpService::VdpSnapshot& vdp, uint64_t referenceTime);

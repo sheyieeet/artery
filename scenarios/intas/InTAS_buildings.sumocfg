@@ -19,7 +19,7 @@
 		<statistic-output value="InTAS.simulation.statistic.xml"/>
 	</output>
 	<time>
-		<begin value="0"/>
+		<begin value="25200"/>
 		<step-length value="0.1"/>
 		<end value="86400"/>
 	</time>

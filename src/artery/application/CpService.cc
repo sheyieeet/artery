@@ -26,8 +26,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <mutex>
 
 #include "artery/nic/RadioDriverBase.h"
 
@@ -282,7 +280,6 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                         if (it != mRxObjectLastUpdateTime.end()) {
                             omnetpp::SimTime timeDiff = simTime() - it->second;
                             emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
-                            writeMetricToCsv("Object_UpdateInterval", timeDiff.dbl(), objId);
                         }
                         mRxObjectLastUpdateTime[objId] = simTime();
                     }
@@ -304,7 +301,6 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                         if (it != mRxObjectLastUpdateTime.end()) {
                             omnetpp::SimTime timeDiff = simTime() - it->second;
                             emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
-                            writeMetricToCsv("Object_UpdateInterval", timeDiff.dbl(), objId);
                         }
                         mRxObjectLastUpdateTime[objId] = simTime();
                     }
@@ -316,13 +312,11 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         if (rxInterval >= 1.0) {
             double rxThroughput = (mAccumulatedRxBytes * 8.0) / rxInterval; // bits per second
             emit(scSignalCpmRxThroughput, rxThroughput);
-            writeMetricToCsv("RX_Throughput", rxThroughput);
             mLastRxThroughputTime = simTime();
             mAccumulatedRxBytes = 0;
         }
 
         emit(scSignalCpmRxObjectCount, (long)numRxObjects);
-        writeMetricToCsv("RX_ObjectCount", numRxObjects);
         
         emit(scSignalCpmReceived, &obj);
     }
@@ -420,14 +414,12 @@ void CpService::sendCpm(const SimTime& T_now)
     if (txInterval >= 1.0) {
         double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
         emit(scSignalCpmTxThroughput, txThroughput);
-        writeMetricToCsv("TX_Throughput", txThroughput);
         mLastTxThroughputTime = T_now;
         mAccumulatedTxBytes = 0;
     }
 
     size_t numTxObjects = mSelectedCpmObjects.size();
     emit(scSignalCpmTxObjectCount, (long)numTxObjects);
-    writeMetricToCsv("TX_ObjectCount", numTxObjects);
 }
 
 void CpService::captureVdpSnapshot()
@@ -1285,49 +1277,7 @@ void CpService::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t 
         ASSERT(value >= 0.0 && value <= 1.0);
         mLastChannelLoad = value;
         emit(scSignalCpmChannelLoad, value);
-        writeMetricToCsv("ChannelLoad", value);
     }
-}
-
-void CpService::writeMetricToCsv(const std::string& metricType, double value, long objectId)
-{
-    static std::mutex csvMutex;
-    static std::ofstream outfile;
-
-    std::lock_guard<std::mutex> lock(csvMutex);
-
-    if (!outfile.is_open()) {
-        std::string filename = "cpm_metrics.csv";
-        bool fileExists = false;
-        {
-            std::ifstream infile(filename);
-            if (infile.good()) {
-                fileExists = true;
-            }
-        }
-        outfile.open(filename, std::ios_base::app);
-        if (!fileExists) {
-            outfile << "Timestamp,StationID,StationType,Metric,Value,ObjectID\n";
-        }
-    }
-
-    std::string stationTypeStr = "Unknown";
-    if (mVehicleDataProvider) {
-        using vanetza::geonet::StationType;
-        StationType st = mVehicleDataProvider->getStationType();
-        if (st == StationType::RSU) {
-            stationTypeStr = "RSU";
-        } else {
-            stationTypeStr = "Vehicle";
-        }
-    }
-    outfile << simTime().dbl() << ","
-            << (mVehicleDataProvider ? mVehicleDataProvider->getStationId() : 0) << ","
-            << stationTypeStr << ","
-            << metricType << ","
-            << value << ","
-            << objectId << "\n";
-    outfile.flush();
 }
 
 }  // namespace artery

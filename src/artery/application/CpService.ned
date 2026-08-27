@@ -20,9 +20,21 @@ simple CpService like ItsG5Service
     parameters:
         @signal[CpmReceived](type=CpObject);
         @signal[CpmSent](type=CpObject);
+        @signal[CpmObjectUpdateInterval](type=double);
+        @signal[CpmRxThroughput](type=double);
+        @signal[CpmRxObjectCount](type=long);
+        @signal[CpmTxThroughput](type=double);
+        @signal[CpmTxObjectCount](type=long);
+        @signal[CpmChannelLoad](type=double);
 
         @statistic[reception](source=CpmReceived;record=vector(cpmStationId)?,vector(cpmReferenceTime)?);
         @statistic[transmission](source=CpmSent;record=vector(cpmStationId)?,vector(cpmReferenceTime)?);
+        @statistic[cpmObjectUpdateInterval](source=CpmObjectUpdateInterval; record=vector,mean,max,min; interpolationmode=none);
+        @statistic[cpmRxThroughput](source=CpmRxThroughput; record=vector,mean,max,min; interpolationmode=none);
+        @statistic[cpmRxObjectCount](source=CpmRxObjectCount; record=vector,mean,max,min; interpolationmode=none);
+        @statistic[cpmTxThroughput](source=CpmTxThroughput; record=vector,mean,max,min; interpolationmode=none);
+        @statistic[cpmTxObjectCount](source=CpmTxObjectCount; record=vector,mean,max,min; interpolationmode=none);
+        @statistic[cpmChannelLoad](source=CpmChannelLoad; record=vector,mean,max,min; interpolationmode=none);
 
         // evaluate DCC transmission interval restrictions
         bool withDccRestriction = default(true);
@@ -51,6 +63,6 @@ simple CpService like ItsG5Service
 
         // redundancy mitigation parameters
         int redundancySuppressionMode @enum(0,1,2) = default(1); // 0: disabled, 1: all, 2: any
-        double redundancyDistanceThreshold @unit(m) = default(1.0m);
-        double redundancyHistoryLifetime @unit(s) = default(0.1s);
+        double redundancyDistanceThreshold @unit(m) = default(4.0m);
+        double redundancyHistoryLifetime @unit(s) = default(1.0s);
 }

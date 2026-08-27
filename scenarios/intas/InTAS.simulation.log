@@ -1,49 +1,26 @@
-***Starting server on port 47137 ***
-Loading net-file from 'ingolstadt.net.xml' ... done (970ms).
-Loading additional-files from 'BusStations.add.xml' ... done (38ms).
-Loading additional-files from 'InTAS_E1.add.xml' ... done (35ms).
-Loading additional-files from 'buildings.poly.xml' ... done (616ms).
-Loading route-files incrementally from 'routes/ped.rou.xml'
-Loading route-files incrementally from 'routes/BusRoutes.flow.xml'
-Loading route-files incrementally from 'routes/InTAS_001.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_002.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_003.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_004.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_005.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_006.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_007.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_008.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_009.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_010.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_011.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_012.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_013.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_014.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_015.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_016.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_017.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_018.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_019.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_020.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_021.rou.xml'
-Loading route-files incrementally from 'routes/InTAS_022.rou.xml'
+***Starting server on port 53429 ***
+Loading net-file from 'ingolstadt.net.xml' ... done (4220ms).
+Loading additional-files from 'BusStations.add.xml' ... done (52ms).
+Loading additional-files from 'InTAS_E1.add.xml' ... done (58ms).
+Loading additional-files from 'buildings.poly.xml' ... done (510ms).
 Loading done.
-Simulation version 1.27.1 started with time: 0.00.
-Simulation ended at time: 175.00.
-Reason: TraCI requested termination.
-Performance:
- Duration: 481.10s
- TraCI-Duration: 401.23s
- Real time factor: 0.363752
- UPS: 904.383108
- UPS-Persons: 3.637520
-Vehicles:
- Inserted: 294 (Loaded: 329)
- Running: 283
- Waiting: 0
- Emergency Braking: 2
-Persons:
- Inserted: 1 (Loaded: 2)
- Running: 1
-DijkstraRouter answered 235 queries and explored 4881.95 edges on average.
-DijkstraRouter spent 1.12s answering queries (4.78ms on average).
+Simulation started with time: 25200.00
+Error: tcpip::Socket::recvAndCheck @ recv: peer shutdown
+Quitting (on error).
+Simulation ended at time: 28803.00
+Performance: 
+ Duration: 42420.97s
+ TraCI-Duration: 3039.17s
+ Real time factor: 0.0849344
+ UPS: 1871.130396
+Vehicles: 
+ Inserted: 14235 (Loaded: 15144)
+ Running: 2429
+ Waiting: 210
+Teleports: 14 (Collisions: 5, Yield: 4, Wrong Lane: 5)
+Persons: 
+ Inserted: 1
+ Running: 0
+
+DijkstraRouter answered 40174 queries and explored 2912.95 edges on average.
+DijkstraRouter spent 258.30s answering queries (6.43ms on average).
