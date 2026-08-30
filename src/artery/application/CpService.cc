@@ -1227,9 +1227,14 @@ void addPerceivedObjectContainer(
             po->velocity = vanetza::asn1::allocate<Vanetza_ITS2_Velocity3dWithConfidence_t>();
             po->velocity->present = Vanetza_ITS2_Velocity3dWithConfidence_PR_polarVelocity;
             auto& polar = po->velocity->choice.polarVelocity;
-            polar.velocityMagnitude.speedValue = static_cast<long>(std::round(snap.speedMps * 100.0));
+            long speedVal = static_cast<long>(std::round(snap.speedMps * 100.0));
+            speedVal = std::max(0L, std::min(16382L, speedVal));
+            polar.velocityMagnitude.speedValue = speedVal;
             polar.velocityMagnitude.speedConfidence = Vanetza_ITS2_SpeedConfidence_unavailable;
-            polar.velocityDirection.value = static_cast<long>(std::round(snap.headingDeg * 10.0));
+            long headingVal = static_cast<long>(std::round(snap.headingDeg * 10.0));
+            while (headingVal < 0) headingVal += 3600;
+            while (headingVal >= 3600) headingVal -= 3600;
+            polar.velocityDirection.value = headingVal;
             polar.velocityDirection.confidence = Vanetza_ITS2_AngleConfidence_unavailable;
         }
 

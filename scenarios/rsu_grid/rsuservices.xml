@@ -3,4 +3,7 @@
 	<service type="artery.application.RsuCaService">
 		<listener port="2001" />
 	</service>
+	<service type="artery.application.CpService">
+		<listener port="2009" />
+	</service>
 </services>

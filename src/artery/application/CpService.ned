@@ -27,8 +27,8 @@ simple CpService like ItsG5Service
         @signal[CpmTxObjectCount](type=long);
         @signal[CpmChannelLoad](type=double);
 
-        @statistic[reception](source=CpmReceived;record=vector(cpmStationId)?,vector(cpmReferenceTime)?);
-        @statistic[transmission](source=CpmSent;record=vector(cpmStationId)?,vector(cpmReferenceTime)?);
+        @statistic[reception](source="count(CpmReceived)";record=vector);
+        @statistic[transmission](source="count(CpmSent)";record=vector);
         @statistic[cpmObjectUpdateInterval](source=CpmObjectUpdateInterval; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmRxThroughput](source=CpmRxThroughput; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmRxObjectCount](source=CpmRxObjectCount; record=vector,mean,max,min; interpolationmode=none);

@@ -3,4 +3,7 @@
 	<service type="artery.application.CaService" name="CA">
 		<listener port="2001" channel="180" aid="36"/>
 	</service>
+	<service type="artery.application.CpService" name="CP">
+		<listener port="2009" channel="180" aid="37"/>
+	</service>
 </services>
