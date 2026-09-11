@@ -65,4 +65,48 @@ simple CpService like ItsG5Service
         int redundancySuppressionMode @enum(0,1,2) = default(1); // 0: disabled, 1: all, 2: any
         double redundancyDistanceThreshold @unit(m) = default(4.0m);
         double redundancyHistoryLifetime @unit(s) = default(1.0s);
+
+        // perception rate
+        double perceptionTimeWindow @unit(s) = default(1.0s);
+        double perceptionRateInterval @unit(s) = default(1.0s);
+        @signal[cpmPerceptionRate25](type=double);
+        @statistic[cpmPerceptionRate25](source=cpmPerceptionRate25; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate50](type=double);
+        @statistic[cpmPerceptionRate50](source=cpmPerceptionRate50; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate75](type=double);
+        @statistic[cpmPerceptionRate75](source=cpmPerceptionRate75; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate100](type=double);
+        @statistic[cpmPerceptionRate100](source=cpmPerceptionRate100; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate125](type=double);
+        @statistic[cpmPerceptionRate125](source=cpmPerceptionRate125; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate150](type=double);
+        @statistic[cpmPerceptionRate150](source=cpmPerceptionRate150; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate175](type=double);
+        @statistic[cpmPerceptionRate175](source=cpmPerceptionRate175; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate200](type=double);
+        @statistic[cpmPerceptionRate200](source=cpmPerceptionRate200; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate225](type=double);
+        @statistic[cpmPerceptionRate225](source=cpmPerceptionRate225; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate250](type=double);
+        @statistic[cpmPerceptionRate250](source=cpmPerceptionRate250; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate275](type=double);
+        @statistic[cpmPerceptionRate275](source=cpmPerceptionRate275; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate300](type=double);
+        @statistic[cpmPerceptionRate300](source=cpmPerceptionRate300; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate325](type=double);
+        @statistic[cpmPerceptionRate325](source=cpmPerceptionRate325; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate350](type=double);
+        @statistic[cpmPerceptionRate350](source=cpmPerceptionRate350; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate375](type=double);
+        @statistic[cpmPerceptionRate375](source=cpmPerceptionRate375; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate400](type=double);
+        @statistic[cpmPerceptionRate400](source=cpmPerceptionRate400; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate425](type=double);
+        @statistic[cpmPerceptionRate425](source=cpmPerceptionRate425; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate450](type=double);
+        @statistic[cpmPerceptionRate450](source=cpmPerceptionRate450; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate475](type=double);
+        @statistic[cpmPerceptionRate475](source=cpmPerceptionRate475; record=vector,mean; interpolationmode=none);
+        @signal[cpmPerceptionRate500](type=double);
+        @statistic[cpmPerceptionRate500](source=cpmPerceptionRate500; record=vector,mean; interpolationmode=none);
 }

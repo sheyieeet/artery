@@ -375,4 +375,14 @@ GlobalEnvironmentModel::preselectObstacles(const std::vector<Position>& area)
     return obstacles;
 }
 
+std::vector<std::shared_ptr<EnvironmentModelObject>> GlobalEnvironmentModel::getAllObjects() const
+{
+    std::vector<std::shared_ptr<EnvironmentModelObject>> result;
+    result.reserve(mObjects.size());
+    for (const auto& kv : mObjects) {
+        result.push_back(kv.second);
+    }
+    return result;
+}
+
 } // namespace artery

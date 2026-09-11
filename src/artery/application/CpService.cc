@@ -9,12 +9,14 @@
 #include "artery/application/CpObject.h"
 #include "artery/application/MultiChannelPolicy.h"
 #include "artery/application/VehicleDataProvider.h"
+#include "artery/envmod/GlobalEnvironmentModel.h"
 #include "artery/envmod/TraCIEnvironmentModelObject.h"
 #include "artery/envmod/sensor/FovSensor.h"
 #include "artery/utility/Identity.h"
 #include "artery/utility/round.h"
 #include "artery/utility/simtime_cast.h"
 #include "veins/base/utils/Coord.h"
+#include <inet/mobility/contract/IMobility.h>
 
 #include <boost/units/cmath.hpp>
 #include <boost/units/systems/si/prefixes.hpp>
@@ -216,6 +218,12 @@ void CpService::initialize()
 
     mDccRestriction = par("withDccRestriction");
 
+    mPerceptionTimeWindow = par("perceptionTimeWindow");
+    mPerceptionRateInterval = par("perceptionRateInterval");
+    for (int i = 0; i < 20; ++i) {
+        std::string signalName = "cpmPerceptionRate" + std::to_string((i + 1) * 25);
+        scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
+    }
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
 
@@ -241,69 +249,78 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         
         size_t numRxObjects = 0;
 
-        // record received objects in history if suppression is enabled
-        if (mRedundancySuppressionMode > 0) {
-            double senderLat = static_cast<double>(mc.referencePosition.latitude);
-            double senderLon = static_cast<double>(mc.referencePosition.longitude);
-            // use our most recent VDP snapshot (captured at last CPM generation or initialized)
-            if (mVdpSnapshot.referenceLatitude == 0) {
-                captureVdpSnapshot();
-            }
-            double receiverLat = static_cast<double>(mVdpSnapshot.referenceLatitude);
-            double receiverLon = static_cast<double>(mVdpSnapshot.referenceLongitude);
-            
-            double latDiffMeters = (senderLat - receiverLat) * 0.011132;
-            double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
-            double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
-            
-            for (int i = 0; i < payload.cpmContainers.list.count; ++i) {
-                Vanetza_ITS2_WrappedCpmContainer_t* wcc = payload.cpmContainers.list.array[i];
-                if (wcc->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
-                    Vanetza_ITS2_PerceivedObjectContainer_t& poc = wcc->containerData.choice.PerceivedObjectContainer;
-                    numRxObjects = poc.perceivedObjects.list.count;
-                    for (int j = 0; j < poc.perceivedObjects.list.count; ++j) {
-                        Vanetza_ITS2_PerceivedObject_t* po = poc.perceivedObjects.list.array[j];
-                        
-                        double objDx = static_cast<double>(po->position.xCoordinate.value) / 100.0;
-                        double objDy = static_cast<double>(po->position.yCoordinate.value) / 100.0;
-                        
-                        Position historyPos(
-                            mVdpSnapshot.position.x.value() + lonDiffMeters + objDx, 
-                            mVdpSnapshot.position.y.value() - latDiffMeters + objDy
-                        );
-                        
-                        mReceivedObjectsHistory.push_back(ReceivedObjectHistory{simTime(), historyPos});
+        double senderLat = static_cast<double>(mc.referencePosition.latitude);
+        double senderLon = static_cast<double>(mc.referencePosition.longitude);
+        // use our most recent VDP snapshot (captured at last CPM generation or initialized)
+        if (mVdpSnapshot.referenceLatitude == 0) {
+            captureVdpSnapshot();
+        }
+        double receiverLat = static_cast<double>(mVdpSnapshot.referenceLatitude);
+        double receiverLon = static_cast<double>(mVdpSnapshot.referenceLongitude);
+        
+        double latDiffMeters = (senderLat - receiverLat) * 0.011132;
+        double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
+        double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
 
-                        // Track object update intervals
-                        long objId = po->objectId ? *(po->objectId) : 0;
-                        auto it = mRxObjectLastUpdateTime.find(objId);
-                        if (it != mRxObjectLastUpdateTime.end()) {
-                            omnetpp::SimTime timeDiff = simTime() - it->second;
-                            emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
-                        }
-                        mRxObjectLastUpdateTime[objId] = simTime();
-                    }
-                }
-            }
-        } else {
-            // just count objects for metrics if redundancy suppression is disabled
-            for (int i = 0; i < payload.cpmContainers.list.count; ++i) {
-                Vanetza_ITS2_WrappedCpmContainer_t* wcc = payload.cpmContainers.list.array[i];
-                if (wcc->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
-                    Vanetza_ITS2_PerceivedObjectContainer_t& poc = wcc->containerData.choice.PerceivedObjectContainer;
-                    numRxObjects = poc.perceivedObjects.list.count;
+        for (int i = 0; i < payload.cpmContainers.list.count; ++i) {
+            Vanetza_ITS2_WrappedCpmContainer_t* wcc = payload.cpmContainers.list.array[i];
+            if (wcc->containerId == Vanetza_ITS2_CpmContainerId_perceivedObjectContainer) {
+                Vanetza_ITS2_PerceivedObjectContainer_t& poc = wcc->containerData.choice.PerceivedObjectContainer;
+                numRxObjects = poc.perceivedObjects.list.count;
+                for (int j = 0; j < poc.perceivedObjects.list.count; ++j) {
+                    Vanetza_ITS2_PerceivedObject_t* po = poc.perceivedObjects.list.array[j];
                     
-                    // Track object update intervals
-                    for (int j = 0; j < poc.perceivedObjects.list.count; ++j) {
-                        Vanetza_ITS2_PerceivedObject_t* po = poc.perceivedObjects.list.array[j];
-                        long objId = po->objectId ? *(po->objectId) : 0;
-                        auto it = mRxObjectLastUpdateTime.find(objId);
-                        if (it != mRxObjectLastUpdateTime.end()) {
-                            omnetpp::SimTime timeDiff = simTime() - it->second;
-                            emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
-                        }
-                        mRxObjectLastUpdateTime[objId] = simTime();
+                    double objDx = static_cast<double>(po->position.xCoordinate.value) / 100.0;
+                    double objDy = static_cast<double>(po->position.yCoordinate.value) / 100.0;
+                    
+                    if (receiverLat > 900000000 || senderLat > 900000000) {
+                        // Invalid coordinates, skip
+                        continue;
                     }
+                    Position historyPos(
+                        mVdpSnapshot.position.x.value() + lonDiffMeters + objDx, 
+                        mVdpSnapshot.position.y.value() - latDiffMeters + objDy
+                    );
+                    
+                    if (mRedundancySuppressionMode > 0) {
+                        mReceivedObjectsHistory.push_back(ReceivedObjectHistory{simTime(), historyPos});
+                    }
+
+                    // Track perceived ground truth objects
+                    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
+                        if (std::isnan(historyPos.x.value()) || std::isnan(historyPos.y.value())) {
+                            continue;
+                        }
+
+                        auto candidates = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
+                        double minDistance = std::numeric_limits<double>::max();
+                        std::shared_ptr<EnvironmentModelObject> bestMatch;
+                        for (const auto& candidate : candidates) {
+                            if (candidate->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+                            double dist;
+                            try {
+                                dist = distance(historyPos, candidate->getCentrePoint()).value();
+                            } catch (const std::exception& e) {
+                                continue;
+                            }
+                            if (dist < minDistance) {
+                                minDistance = dist;
+                                bestMatch = candidate;
+                            }
+                        }
+                        if (bestMatch && minDistance <= 10.0) {
+                            mPerceivedGroundTruthObjects[bestMatch->getExternalId()] = simTime();
+                        }
+                    }
+
+                    // Track object update intervals
+                    long objId = po->objectId ? *(po->objectId) : 0;
+                    auto it = mRxObjectLastUpdateTime.find(objId);
+                    if (it != mRxObjectLastUpdateTime.end()) {
+                        omnetpp::SimTime timeDiff = simTime() - it->second;
+                        emit(scSignalCpmObjectUpdateInterval, timeDiff.dbl());
+                    }
+                    mRxObjectLastUpdateTime[objId] = simTime();
                 }
             }
         }
@@ -326,6 +343,11 @@ void CpService::trigger()
 {
     Enter_Method("trigger");
     checkTriggeringConditions(simTime());
+    
+    if (simTime() - mLastPerceptionRateUpdate >= mPerceptionRateInterval) {
+        updatePerceptionRate();
+        mLastPerceptionRateUpdate = simTime();
+    }
 }
 
 void CpService::checkTriggeringConditions(const SimTime& T_now)
@@ -448,6 +470,19 @@ void CpService::captureVdpSnapshot()
         mVdpSnapshot.stationId = identity ? identity->application : 0;
         mVdpSnapshot.stationType = static_cast<int>(vanetza::geonet::StationType::RSU);
         mVdpSnapshot.orientationAngleDeciDeg = 36001; // unavailable
+        
+        omnetpp::cModule* node = getParentModule();
+        while (node && !node->getSubmodule("mobility")) {
+            node = node->getParentModule();
+        }
+        if (node) {
+            if (omnetpp::cModule* mobMod = node->getSubmodule("mobility")) {
+                if (auto mobility = dynamic_cast<inet::IMobility*>(mobMod)) {
+                    auto pos = mobility->getCurrentPosition();
+                    mVdpSnapshot.position = Position(pos.x, pos.y);
+                }
+            }
+        }
     }
 }
 
@@ -584,7 +619,12 @@ void CpService::capturePerceivedObjectSnapshot(
         }
         snap.cpsId = *cpsId;
 
-        const Position& objectPos = objPtr->getCentrePoint();
+        Position objectPos;
+        try {
+            objectPos = objPtr->getCentrePoint();
+        } catch (const std::exception& e) {
+            continue; // Skip this object if it has left the simulation
+        }
         snap.xCm = round(objectPos.x - egoPos.x, vanetza::units::si::meter * boost::units::si::centi);
         if (snap.xCm < Vanetza_ITS2_CartesianCoordinateLarge_negativeOutOfRange)
             snap.xCm = Vanetza_ITS2_CartesianCoordinateLarge_negativeOutOfRange;
@@ -1169,6 +1209,72 @@ void CpService::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t 
         ASSERT(value >= 0.0 && value <= 1.0);
         mLastChannelLoad = value;
         emit(scSignalCpmChannelLoad, value);
+    }
+}
+
+void CpService::updatePerceptionRate()
+{
+    // Clean up expired items
+    for (auto it = mPerceivedGroundTruthObjects.begin(); it != mPerceivedGroundTruthObjects.end(); ) {
+        if (simTime() - it->second > mPerceptionTimeWindow) {
+            it = mPerceivedGroundTruthObjects.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (!mLocalEnvironmentModel) return;
+    auto globalEnv = mLocalEnvironmentModel->getGlobalEnvironmentModel();
+    if (!globalEnv) return;
+
+    if (mVdpSnapshot.referenceLatitude == 0) {
+        captureVdpSnapshot();
+    }
+    Position egoPos;
+    if (mVehicleDataProvider) {
+        egoPos = mVehicleDataProvider->position();
+    } else {
+        egoPos = mVdpSnapshot.position;
+    }
+
+    // Include locally tracked objects in the perceived ground truth objects map
+    auto localObjects = mLocalEnvironmentModel->allObjects();
+    for (const auto& objPair : localObjects) {
+        if (auto objPtr = objPair.first.lock()) {
+            mPerceivedGroundTruthObjects[objPtr->getExternalId()] = simTime();
+        }
+    }
+
+    std::vector<int> totalObjects(20, 0);
+    std::vector<int> perceivedObjects(20, 0);
+
+    auto allObjects = globalEnv->getAllObjects();
+    for (const auto& obj : allObjects) {
+        if (obj->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+        
+        double dist;
+        try {
+            dist = distance(egoPos, obj->getCentrePoint()).value();
+        } catch (const std::exception& e) {
+            continue;
+        }
+        if (dist > 0.0 && dist <= 500.0) {
+            int binIdx = std::ceil(dist / 25.0) - 1;
+            if (binIdx < 0) binIdx = 0;
+            if (binIdx >= 20) binIdx = 19;
+            
+            totalObjects[binIdx]++;
+            if (mPerceivedGroundTruthObjects.find(obj->getExternalId()) != mPerceivedGroundTruthObjects.end()) {
+                perceivedObjects[binIdx]++;
+            }
+        }
+    }
+
+    for (int i = 0; i < 20; ++i) {
+        if (totalObjects[i] > 0) {
+            double ratio = static_cast<double>(perceivedObjects[i]) / totalObjects[i];
+            emit(scSignalPerceptionRate[i], ratio);
+        }
     }
 }
 

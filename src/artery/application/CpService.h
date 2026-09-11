@@ -199,6 +199,14 @@ private:
     size_t mAccumulatedRxBytes = 0;
     double mLastChannelLoad = 0.0;
     std::unordered_map<uint64_t, omnetpp::SimTime> mRxObjectLastUpdateTime;
+    
+    // Perception rate
+    omnetpp::SimTime mPerceptionTimeWindow;
+    omnetpp::SimTime mPerceptionRateInterval;
+    omnetpp::SimTime mLastPerceptionRateUpdate = omnetpp::SimTime::ZERO;
+    std::unordered_map<std::string, omnetpp::SimTime> mPerceivedGroundTruthObjects;
+    omnetpp::simsignal_t scSignalPerceptionRate[20];
+    void updatePerceptionRate();
 };
 
 Cpm createCollectivePerceptionMessage(const CpService::VdpSnapshot& vdp, uint64_t referenceTime);

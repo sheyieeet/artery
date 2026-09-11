@@ -91,6 +91,12 @@ public:
     std::vector<std::shared_ptr<EnvironmentModelObstacle>>
     preselectObstacles(const std::vector<Position>& area);
 
+    /**
+     * Get all currently known dynamic objects
+     * @return all objects
+     */
+    std::vector<std::shared_ptr<EnvironmentModelObject>> getAllObjects() const;
+
 private:
     /**
      * Refresh all dynamic objects in the database.

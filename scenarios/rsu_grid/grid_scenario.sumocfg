@@ -8,7 +8,7 @@
     
     <processing>
     	<collision.check-junctions value="true"/>
-        <collision.action value="remove"/>
+        <collision.action value="none"/>
         <time-to-teleport value="-1"/> 
         <default.emergencydecel value="-1"/>
     </processing>
