@@ -4,6 +4,8 @@ target_sources(core PRIVATE
     DenmObject.cc
     DenService.cc
     CpService.cc
+    CpServiceEtsi.cc
+    CpServiceStatic.cc
     CpObject.cc
     ExampleService.cc
     GbcMockMessage.cc
