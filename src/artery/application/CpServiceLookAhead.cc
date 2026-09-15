@@ -59,7 +59,7 @@ static constexpr std::size_t kCpmSensorIdSpace = 256;
 static constexpr int kInvalidLemSensorId = -1;
 static constexpr const_simtime_t kNeverUsedSimTime = -1;
 
-void setPOClassificationEtsi(Vanetza_ITS2_PerceivedObject_t& po, vanetza::geonet::StationType st)
+void setPOClassificationLookAhead(Vanetza_ITS2_PerceivedObject_t& po, vanetza::geonet::StationType st)
 {
     po.classification = vanetza::asn1::allocate<Vanetza_ITS2_ObjectClassDescription_t>();
 
@@ -1127,7 +1127,7 @@ bool CpServiceLookAhead::checkPerceivedObjectTrigger(const SimTime& T_now)
                 continue;
             }
             // Look ahead : next posotion
-            double nextP = po.distanceDiffM + speedMps * mGenCpm.dbl() + 0.5*(po.speedDiffMps/mGenCpm.dbl())*pow(mGenCpm.dbl(),2);
+            double nextP = po.distanceDiffM + po.speedMps * mGenCpm.dbl() + 0.5*(po.speedDiffMps/mGenCpm.dbl())*pow(mGenCpm.dbl(),2);
             if(nextP > mMinPositionChangeThreshold.value()){
                 selected.push_back(idx);
                 continue;
@@ -1139,7 +1139,7 @@ bool CpServiceLookAhead::checkPerceivedObjectTrigger(const SimTime& T_now)
                 continue;
             }
             // Look ahead : next time since last inclusion
-            double nextT = po.sinceLastInclusionSeconds + mGenCpm;
+            double nextT = po.sinceLastInclusionSeconds + mGenCpm.dbl();
             if(nextT >= mGenCpmMax.dbl()){
                 selected.push_back(idx);
                 continue;
@@ -1578,7 +1578,7 @@ void addPerceivedObjectContainerLookAhead(
 
         po->classification = nullptr;
         if (snap.stationType >= 0) {
-            setPOClassificationEtsi(*po, static_cast<vanetza::geonet::StationType>(snap.stationType));
+            setPOClassificationLookAhead(*po, static_cast<vanetza::geonet::StationType>(snap.stationType));
         }
 
         po->sensorIdList = nullptr;
