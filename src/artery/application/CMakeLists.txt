@@ -5,6 +5,7 @@ target_sources(core PRIVATE
     DenService.cc
     CpService.cc
     CpServiceEtsi.cc
+    CpServiceLookAhead.cc
     CpServiceStatic.cc
     CpObject.cc
     ExampleService.cc
