@@ -224,6 +224,8 @@ void CpService::initialize()
         std::string signalName = "cpmPerceptionRate" + std::to_string((i + 1) * 25);
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
+    scSignalCpmPrr = registerSignal("cpmPrr");
+
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
 
@@ -240,6 +242,11 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
     const Cpm* cpm = boost::apply_visitor(visitor, *packet);
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper;
+        
+        mTotalCpmReceived++;
+        if (mTotalCpmSent > 0) {
+            emit(scSignalCpmPrr, (double)mTotalCpmReceived / mTotalCpmSent);
+        }
         
         size_t rxSize = boost::size(*packet);
         mAccumulatedRxBytes += rxSize;
@@ -365,6 +372,7 @@ void CpService::checkTriggeringConditions(const SimTime& T_now)
 
 void CpService::sendCpm(const SimTime& T_now)
 {
+    mTotalCpmSent++;
     captureVdpSnapshot();
     const auto lemSensorsSnapshot = mLocalEnvironmentModel->getSensors();
     const auto lemObjectsSnapshot = mLocalEnvironmentModel->allObjects();

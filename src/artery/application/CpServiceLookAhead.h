@@ -222,6 +222,9 @@ private:
     omnetpp::simsignal_t scSignalPerceptionRate[20];
     void updatePerceptionRate();
     void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
+    uint32_t mTotalCpmSent = 0;
+    uint32_t mTotalCpmReceived = 0;
+    omnetpp::simsignal_t scSignalCpmPrr;
 };
 
 Cpm createCollectivePerceptionMessageLookAhead(const CpServiceLookAhead::VdpSnapshot& vdp, uint64_t referenceTime);

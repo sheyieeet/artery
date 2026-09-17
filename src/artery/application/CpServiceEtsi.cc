@@ -226,6 +226,7 @@ void CpServiceEtsi::initialize()
         std::string signalName = "cpmPerceptionRate" + std::to_string((i + 1) * 25);
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
+    scSignalCpmPrr = registerSignal("cpmPrr");
 
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
@@ -258,6 +259,10 @@ void CpServiceEtsi::indicate(const vanetza::btp::DataIndication& ind, std::uniqu
     // receive CPM
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper; 
+        mTotalCpmReceived++;
+        if (mTotalCpmSent > 0) {
+            emit(scSignalCpmPrr, (double)mTotalCpmReceived / mTotalCpmSent);
+        }
         emit(scSignalCpmReceived, &obj);
 
         // Log received CPM metrics
@@ -546,6 +551,7 @@ void CpServiceEtsi::checkTriggeringConditions(const SimTime& T_now)
 
 void CpServiceEtsi::sendCpm(const SimTime& T_now)
 {
+    mTotalCpmSent++;
     captureVdpSnapshot();
     const auto lemSensorsSnapshot = mLocalEnvironmentModel->getSensors();
     const auto lemObjectsSnapshot = mLocalEnvironmentModel->allObjects();
@@ -698,6 +704,7 @@ void CpServiceEtsi::sendSelectedLink()
     }
 
     if (!selectedSnapshots.empty()) {
+        mTotalCpmSent++;
         captureVdpSnapshot();
         const auto referenceTime = countTaiMilliseconds(mTimer->getTimeFor(mVdpSnapshot.updated));
         Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, referenceTime);
