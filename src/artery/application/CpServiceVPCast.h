@@ -234,6 +234,8 @@ private:
     std::unordered_map<std::string, omnetpp::SimTime> mPerceivedGroundTruthObjects;
     omnetpp::simsignal_t scSignalPerceptionRate[20];
     void updatePerceptionRate();
+    omnetpp::simsignal_t scSignalCpmExpectedDistance;
+    omnetpp::simsignal_t scSignalCpmReceivedDistance;
     void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
 };
 

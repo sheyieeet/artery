@@ -26,7 +26,7 @@ simple CpServiceStatic like ItsG5Service
         @signal[CpmTxThroughput](type=double);
         @signal[CpmTxObjectCount](type=long);
         @signal[CpmChannelLoad](type=double);
-        @signal[cpmPrr](type=double);
+
 
         @statistic[reception](source="count(CpmReceived)";record=vector);
         @statistic[transmission](source="count(CpmSent)";record=vector);
@@ -36,7 +36,8 @@ simple CpServiceStatic like ItsG5Service
         @statistic[cpmTxThroughput](source=CpmTxThroughput; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmTxObjectCount](source=CpmTxObjectCount; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmChannelLoad](source=CpmChannelLoad; record=vector,mean,max,min; interpolationmode=none);
-        @statistic[cpmPrr](title="Packet Receive Ratio"; source="cpmPrr"; record=vector,mean; interpolationmode=sample-hold);
+        @statistic[cpmExpectedDistance](title="CPM Expected Distance"; source="cpmExpectedDistance"; record=vector);
+        @statistic[cpmReceivedDistance](title="CPM Received Distance"; source="cpmReceivedDistance"; record=vector);
 
         // evaluate DCC transmission interval restrictions
         bool withDccRestriction = default(true);

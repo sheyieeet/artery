@@ -230,7 +230,8 @@ void CpServiceStatic::initialize()
         std::string signalName = "cpmPerceptionRate" + std::to_string((i + 1) * 25);
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
-    scSignalCpmPrr = registerSignal("cpmPrr");
+    scSignalCpmExpectedDistance = registerSignal("cpmExpectedDistance");
+    scSignalCpmReceivedDistance = registerSignal("cpmReceivedDistance");
 
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
@@ -263,10 +264,7 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
     // receive CPM
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper; 
-        mTotalCpmReceived++;
-        if (mTotalCpmSent > 0) {
-            emit(scSignalCpmPrr, (double)mTotalCpmReceived / mTotalCpmSent);
-        }
+
         emit(scSignalCpmReceived, &obj);
 
         // Log received CPM metrics
@@ -287,6 +285,11 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
         double latDiffMeters = (senderLat - receiverLat) * 0.011132;
         double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
         double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
+
+        double rxDistance = std::hypot(latDiffMeters, lonDiffMeters);
+        if (rxDistance <= 500.0) {
+            emit(scSignalCpmReceivedDistance, rxDistance);
+        }
         
         auto& containerList = (**cpm).payload.cpmContainers.list;
         for (int c_idx = 0; c_idx < containerList.count; ++c_idx) {
@@ -569,7 +572,6 @@ void CpServiceStatic::checkTriggeringConditions(const SimTime& T_now)
 
 void CpServiceStatic::sendCpm(const SimTime& T_now)
 {
-    mTotalCpmSent++;
     captureVdpSnapshot();
     const auto lemSensorsSnapshot = mLocalEnvironmentModel->getSensors();
     const auto lemObjectsSnapshot = mLocalEnvironmentModel->allObjects();
@@ -626,6 +628,20 @@ void CpServiceStatic::sendCpm(const SimTime& T_now)
 
     CpObject obj(std::move(cpm));
     emit(scSignalCpmSent, &obj);
+
+    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
+        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
+        auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
+        for (const auto& objPtr : allObjects) {
+            if (objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+            try {
+                double dist = distance(egoPos, objPtr->getCentrePoint()).value();
+                if (dist > 0.0 && dist <= 500.0) {
+                    emit(scSignalCpmExpectedDistance, dist);
+                }
+            } catch (...) {}
+        }
+    }
 
     // Estimate size of CPM safely
     size_t txSize = 22; // Header + Management Container
@@ -750,7 +766,6 @@ void CpServiceStatic::sendSelectedLink(uint32_t targetVehicleId, const vanetza::
     // geounicast
 // V2X Transmission (Fallback to SHB)
     if (!selectedSnapshots.empty()) {
-        mTotalCpmSent++;
         Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, countTaiMilliseconds(mTimer->getTimeFor(t_now)));
         addOriginatingRsuContainerStatic(responseCpm);
         addPerceivedObjectContainer(responseCpm, selectedSnapshots, selectedIndices, mLastCpmTimestamp);

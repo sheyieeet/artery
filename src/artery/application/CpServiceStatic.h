@@ -213,9 +213,8 @@ private:
     std::unordered_map<std::string, omnetpp::SimTime> mPerceivedGroundTruthObjects;
     omnetpp::simsignal_t scSignalPerceptionRate[20];
     void updatePerceptionRate();
-    uint32_t mTotalCpmSent = 0;
-    uint32_t mTotalCpmReceived = 0;
-    omnetpp::simsignal_t scSignalCpmPrr;
+    omnetpp::simsignal_t scSignalCpmExpectedDistance;
+    omnetpp::simsignal_t scSignalCpmReceivedDistance;
 };
 
 Cpm createCollectivePerceptionMessage(const CpServiceStatic::VdpSnapshot& vdp, uint64_t referenceTime);

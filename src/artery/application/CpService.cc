@@ -224,7 +224,8 @@ void CpService::initialize()
         std::string signalName = "cpmPerceptionRate" + std::to_string((i + 1) * 25);
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
-    scSignalCpmPrr = registerSignal("cpmPrr");
+    scSignalCpmExpectedDistance = registerSignal("cpmExpectedDistance");
+    scSignalCpmReceivedDistance = registerSignal("cpmReceivedDistance");
 
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
@@ -243,10 +244,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper;
         
-        mTotalCpmReceived++;
-        if (mTotalCpmSent > 0) {
-            emit(scSignalCpmPrr, (double)mTotalCpmReceived / mTotalCpmSent);
-        }
+
         
         size_t rxSize = boost::size(*packet);
         mAccumulatedRxBytes += rxSize;
@@ -268,6 +266,11 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         double latDiffMeters = (senderLat - receiverLat) * 0.011132;
         double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
         double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
+
+        double rxDistance = std::hypot(latDiffMeters, lonDiffMeters);
+        if (rxDistance <= 500.0) {
+            emit(scSignalCpmReceivedDistance, rxDistance);
+        }
 
         for (int i = 0; i < payload.cpmContainers.list.count; ++i) {
             Vanetza_ITS2_WrappedCpmContainer_t* wcc = payload.cpmContainers.list.array[i];
@@ -372,7 +375,7 @@ void CpService::checkTriggeringConditions(const SimTime& T_now)
 
 void CpService::sendCpm(const SimTime& T_now)
 {
-    mTotalCpmSent++;
+
     captureVdpSnapshot();
     const auto lemSensorsSnapshot = mLocalEnvironmentModel->getSensors();
     const auto lemObjectsSnapshot = mLocalEnvironmentModel->allObjects();
@@ -428,6 +431,20 @@ void CpService::sendCpm(const SimTime& T_now)
 
     CpObject obj(std::move(cpm));
     emit(scSignalCpmSent, &obj);
+
+    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
+        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
+        auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
+        for (const auto& objPtr : allObjects) {
+            if (objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+            try {
+                double dist = distance(egoPos, objPtr->getCentrePoint()).value();
+                if (dist > 0.0 && dist <= 500.0) {
+                    emit(scSignalCpmExpectedDistance, dist);
+                }
+            } catch (...) {}
+        }
+    }
 
     using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
