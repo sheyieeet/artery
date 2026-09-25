@@ -26,7 +26,8 @@ simple CpServiceVPCast like ItsG5Service
         @signal[CpmTxThroughput](type=double);
         @signal[CpmTxObjectCount](type=long);
         @signal[CpmChannelLoad](type=double);
-
+        @signal[cpmExpectedDistance](type=double);
+	@signal[cpmReceivedDistance](type=double);
 
         @statistic[reception](source="count(CpmReceived)";record=vector);
         @statistic[transmission](source="count(CpmSent)";record=vector);

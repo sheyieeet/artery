@@ -260,9 +260,6 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
     // receive CPM
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper; 
-        emit(scSignalCpmReceived, &obj);
-        
-
 
         // Log received CPM metrics
         size_t numRxObjects = 0;
@@ -289,11 +286,6 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
         double latDiffMeters = (senderLat - receiverLat) * 0.011132;
         double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
         double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
-
-        double rxDistance = std::hypot(latDiffMeters, lonDiffMeters);
-        if (rxDistance <= 500.0) {
-            emit(scSignalCpmReceivedDistance, rxDistance);
-        }
 
         bool isRsu = (mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU) == vanetza::geonet::StationType::RSU;
 
@@ -583,6 +575,12 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
             pair.second.reliabilityRatio = (t_max - t_elapsed) / t_max;
             if (pair.second.reliabilityRatio < 0.0) pair.second.reliabilityRatio = 0.0;
         }
+
+        double rxDistance = std::hypot(latDiffMeters, lonDiffMeters);
+        if (rxDistance > 0.0 && rxDistance <= 500.0) {
+            emit(scSignalCpmReceivedDistance, rxDistance);
+        }
+        emit(scSignalCpmReceived, &obj);
     }
 }
 
@@ -665,23 +663,8 @@ void CpServiceVPCast::sendCpm(const SimTime& T_now)
     request.gn.maximum_lifetime = geonet::Lifetime{geonet::Lifetime::Base::One_Second, 1};
     request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
     request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
-
     CpObject obj(std::move(cpm));
     emit(scSignalCpmSent, &obj);
-
-    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
-        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
-        auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
-        for (const auto& objPtr : allObjects) {
-            if (objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
-            try {
-                double dist = distance(egoPos, objPtr->getCentrePoint()).value();
-                if (dist > 0.0 && dist <= 500.0) {
-                    emit(scSignalCpmExpectedDistance, dist);
-                }
-            } catch (...) {}
-        }
-    }
 
     // Estimate size of CPM safely
     size_t txSize = 22; // Header + Management Container
@@ -717,6 +700,29 @@ void CpServiceVPCast::sendCpm(const SimTime& T_now)
     size_t numTxObjects = includeObjects ? mSelectedCpmObjects.size() : 0;
     emit(scSignalCpmTxObjectCount, (long)numTxObjects);
     writeMetricToCsv("TX_ObjectCount", numTxObjects);
+
+    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
+        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
+        auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
+        for (const auto& objPtr : allObjects) {
+            if (objPtr->getExternalId().empty() || objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+            
+            // CRITICAL FIX: Only count actual TraCI vehicles, ignore static map geometry
+            auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
+            if (!traciObj) continue;
+
+            try {
+                double dist = distance(egoPos, objPtr->getCentrePoint()).value();
+                if (dist > 0.0 && dist <= 500.0) {
+                    emit(scSignalCpmExpectedDistance, dist);
+                }
+            } catch (const std::exception& e) { 
+                continue; 
+            } catch (...) { 
+                continue; 
+            }
+        }
+    }
 }
 
 void CpServiceVPCast::sendSelectedLink()

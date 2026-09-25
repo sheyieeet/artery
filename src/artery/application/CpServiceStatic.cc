@@ -265,8 +265,6 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper; 
 
-        emit(scSignalCpmReceived, &obj);
-
         // Log received CPM metrics
         size_t numRxObjects = 0;
         size_t numRxSensors = 0;
@@ -285,11 +283,6 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
         double latDiffMeters = (senderLat - receiverLat) * 0.011132;
         double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
         double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
-
-        double rxDistance = std::hypot(latDiffMeters, lonDiffMeters);
-        if (rxDistance <= 500.0) {
-            emit(scSignalCpmReceivedDistance, rxDistance);
-        }
         
         auto& containerList = (**cpm).payload.cpmContainers.list;
         for (int c_idx = 0; c_idx < containerList.count; ++c_idx) {
@@ -531,6 +524,12 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
         }
 
         sendSelectedLink(senderVehicleId, ind);
+        
+        double rxDistance = std::hypot(latDiffMeters, lonDiffMeters);
+        if (rxDistance > 0.0 && rxDistance <= 500.0) {
+            emit(scSignalCpmReceivedDistance, rxDistance);
+        }
+        emit(scSignalCpmReceived, &obj);
     }
 }
 
@@ -625,23 +624,8 @@ void CpServiceStatic::sendCpm(const SimTime& T_now)
     request.gn.maximum_lifetime = geonet::Lifetime{geonet::Lifetime::Base::One_Second, 1};
     request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
     request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
-
     CpObject obj(std::move(cpm));
     emit(scSignalCpmSent, &obj);
-
-    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
-        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
-        auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
-        for (const auto& objPtr : allObjects) {
-            if (objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
-            try {
-                double dist = distance(egoPos, objPtr->getCentrePoint()).value();
-                if (dist > 0.0 && dist <= 500.0) {
-                    emit(scSignalCpmExpectedDistance, dist);
-                }
-            } catch (...) {}
-        }
-    }
 
     // Estimate size of CPM safely
     size_t txSize = 22; // Header + Management Container
@@ -677,6 +661,29 @@ void CpServiceStatic::sendCpm(const SimTime& T_now)
     size_t numTxObjects = includeObjects ? mSelectedCpmObjects.size() : 0;
     emit(scSignalCpmTxObjectCount, (long)numTxObjects);
     writeMetricToCsv("TX_ObjectCount", numTxObjects);
+
+    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
+        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
+        auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
+        for (const auto& objPtr : allObjects) {
+            if (objPtr->getExternalId().empty() || objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+            
+            // CRITICAL FIX: Only count actual TraCI vehicles, ignore static map geometry
+            auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
+            if (!traciObj) continue;
+
+            try {
+                double dist = distance(egoPos, objPtr->getCentrePoint()).value();
+                if (dist > 0.0 && dist <= 500.0) {
+                    emit(scSignalCpmExpectedDistance, dist);
+                }
+            } catch (const std::exception& e) { 
+                continue; 
+            } catch (...) { 
+                continue; 
+            }
+        }
+    }
 }
 
 // This is the custom function to filter and send cpm to selected downlink using custom inclusion rule in this research
