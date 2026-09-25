@@ -1,0 +1,77 @@
+--- src/artery/application/CpServiceVPCast.cc
++++ src/artery/application/CpServiceVPCast.cc
+@@ -262,6 +262,12 @@
+         emit(scSignalCpmReceived, &obj);
+ 
+         // Log received CPM metrics
++        const Vanetza_ITS2_CPM_PDU_Descriptions_ManagementContainer_t& mc = (**cpm).payload.managementContainer;
++        uint32_t senderVehicleId = (**cpm).header.stationId;
++        std::string refTimeStr;
++        for (int i = 0; i < mc.referenceTime.size; ++i) {
++            refTimeStr += std::to_string(mc.referenceTime.buf[i]);
++        }
++        std::string msgId = std::to_string(senderVehicleId) + "_" + refTimeStr;
++
+         size_t numRxObjects = 0;
+         size_t numRxSensors = 0;
+         bool hasRsuContainer = false;
+         bool hasVehicleContainer = false;
+         
+-        const Vanetza_ITS2_CPM_PDU_Descriptions_ManagementContainer_t& mc = (**cpm).payload.managementContainer;
+-        double senderLat = static_cast<double>(mc.referencePosition.latitude);
+-        double senderLon = static_cast<double>(mc.referencePosition.longitude);
+         if (mVdpSnapshot.referenceLatitude == 0) {
+             captureVdpSnapshot();
+         }
+@@ -274,6 +280,48 @@
+         double latDiffMeters = (senderLat - receiverLat) * 0.011132;
+         double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
+         double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
++
++        bool isRsu = (mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU) == vanetza::geonet::StationType::RSU;
++
++        if (!isRsu) {
++            double egoHeading = mVehicleDataProvider ? mVehicleDataProvider->heading().value() : 0.0;
++            double hx = std::sin(egoHeading * M_PI / 180.0);
++            double hy = std::cos(egoHeading * M_PI / 180.0);
++            double dotProduct = lonDiffMeters * hx + latDiffMeters * hy;
++            bool isBackVehicle = (dotProduct < 0);
++
++            auto it = mRebroadcastStates.find(msgId);
++            if (it == mRebroadcastStates.end()) {
++                // New message
++                int slotMax = 5;
++                double egoSpeed = mVehicleDataProvider ? mVehicleDataProvider->speed().value() : 0.0;
++                double vr = std::max(0.0, std::min(egoSpeed / 30.0, 1.0)); // assume max speed 30m/s
++                double nSlots = (1.0 - slotMax) * vr + slotMax;
++                double distance = std::sqrt(latDiffMeters * latDiffMeters + lonDiffMeters * lonDiffMeters);
++                double P = std::min(distance / 500.0, 1.0);
++                double waitT = nSlots * (1.0 - P);
++
++                RebroadcastState state;
++                state.msgId = msgId;
++                state.cpm = visitor.shared_wrapper.shared_ptr();
++                state.phase = RebroadcastPhase::WAITING_T;
++                state.expirationTime = simTime() + 1.0; // T3 = 1s
++                
++                cMessage* timerMsg = new cMessage("RebroadcastTimer_T");
++                timerMsg->setContextPointer(new std::string(msgId));
++                state.timerMsg = timerMsg;
++                
++                mRebroadcastStates[msgId] = state;
++                scheduleAt(simTime() + waitT, timerMsg);
++            } else {
++                // Duplicate message
++                if (it->second.phase == RebroadcastPhase::WAITING_T1 || it->second.phase == RebroadcastPhase::WAITING_T) {
++                    if (isBackVehicle) {
++                        if (it->second.timerMsg) {
++                            cancelAndDelete(it->second.timerMsg);
++                            it->second.timerMsg = nullptr;
++                        }
++                        mRebroadcastStates.erase(it);
++                    }
++                }
++            }
++        }
+         
+         auto& containerList = (**cpm).payload.cpmContainers.list;

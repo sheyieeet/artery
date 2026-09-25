@@ -3,8 +3,8 @@
  * Licensed under GPLv2, see COPYING file for detailed license and warranty terms.
  */
 
-#ifndef ARTERY_CPSERVICE_H_
-#define ARTERY_CPSERVICE_H_
+#ifndef ARTERY_CPSERVICE_WEIGHTEDPPERSISTENCE_H_
+#define ARTERY_CPSERVICE_WEIGHTEDPPERSISTENCE_H_
 
 #include "artery/application/ItsG5BaseService.h"
 #include "artery/envmod/LocalEnvironmentModel.h"
@@ -33,7 +33,7 @@ class NetworkInterfaceTable;
 class Timer;
 class VehicleDataProvider;
 
-class CpServiceVPCast : public ItsG5BaseService
+class CpServiceWeightedPPersistence : public ItsG5BaseService
 {
 public:
     struct VdpSnapshot {
@@ -102,32 +102,8 @@ public:
         Angle orientation;
     };
 
-    struct ObjectState {
-        omnetpp::SimTime lastTxTime = omnetpp::SimTime::ZERO;
-        double lastTxX = 0.0;
-        double lastTxY = 0.0;
-        double lastTxSpeed = 0.0;
-    };
-
-    enum class RebroadcastPhase { WAITING_T, WAITING_T1, SCF_REBROADCAST };
-
-    struct RebroadcastState {
-        std::string msgId;
-        std::shared_ptr<const Cpm> cpm;
-        RebroadcastPhase phase = RebroadcastPhase::WAITING_T;
-        omnetpp::SimTime expirationTime;
-        omnetpp::cMessage* timerMsg = nullptr;
-    };
-
-    std::unordered_map<std::string, RebroadcastState> mRebroadcastStates;
-    void handleRebroadcastTimer(omnetpp::cMessage* msg);
-    std::map<uint32_t, uint64_t> mLatestSeenRefTime;
-
-    std::map<long, ObjectState> mObjectTxStates;
-    omnetpp::cMessage* mCpmTimer = nullptr;
-
-    CpServiceVPCast();
-    ~CpServiceVPCast() override;
+    CpServiceWeightedPPersistence();
+    ~CpServiceWeightedPPersistence() override;
     void initialize() override;
     void finish() override;
     void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
@@ -150,7 +126,7 @@ private:
     
     void checkTriggeringConditions(const omnetpp::SimTime& T_now);
     void sendCpm(const omnetpp::SimTime& T_now);
-    void sendSelectedLink();
+    void sendSelectedLink(uint32_t targetVehicleId, const vanetza::btp::DataIndication& ind);
     void captureVdpSnapshot();
     void captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors);
     ObjectVdpSnapshotMap captureObjectVdpSnapshot(const LocalEnvironmentModel::TrackedObjects& objects) const;
@@ -227,6 +203,8 @@ private:
     size_t mAccumulatedRxBytes = 0;
     double mLastChannelLoad = 0.0;
     std::unordered_map<uint64_t, omnetpp::SimTime> mRxObjectLastUpdateTime;
+    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
+    omnetpp::cMessage* cpmTimer = nullptr;
 
     // Perception rate
     omnetpp::SimTime mPerceptionTimeWindow;
@@ -235,21 +213,41 @@ private:
     std::unordered_map<std::string, omnetpp::SimTime> mPerceivedGroundTruthObjects;
     omnetpp::simsignal_t scSignalPerceptionRate[20];
     void updatePerceptionRate();
-    omnetpp::simsignal_t scSignalCpmExpectedDistance;
-    omnetpp::simsignal_t scSignalCpmReceivedDistance;
-    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
+    uint32_t mTotalCpmSent = 0;
+    uint32_t mTotalCpmReceived = 0;
+    omnetpp::simsignal_t scSignalCpmPrr;
+
+    // Weighted P-Persistence state
+    struct BufferedMessage {
+        double minDij;
+        bool heardRetransmission;
+        std::shared_ptr<vanetza::asn1::r2::Cpm> cpm;
+        omnetpp::cMessage* timer1;
+        omnetpp::cMessage* timer2;
+        int hops; // to track TTL if needed locally
+    };
+    std::unordered_map<uint64_t, BufferedMessage> mBufferedMessages;
+    
+    double mWaitTime;
+    double mTau;
+    double mTransmissionRange;
+
+    void handleTimer1(omnetpp::cMessage* msg);
+    void handleTimer2(omnetpp::cMessage* msg);
+    void rebroadcastCpm(uint64_t packetId);
+
 };
 
-Cpm createCollectivePerceptionMessage(const CpServiceVPCast::VdpSnapshot& vdp, uint64_t referenceTime);
-void addOriginatingVehicleContainer(Cpm& message, const CpServiceVPCast::VdpSnapshot& vdp);
-void addOriginatingRsuContainerVPCast(Cpm& message);
-void addSensorInformationContainer(Cpm& message, const std::vector<CpServiceVPCast::SensorSnapshot>& sensorSnapshot);
-void addPerceptionRegionContainerVPCast(Cpm& message);
-void addPerceivedObjectContainer(
-    Cpm& message, const std::vector<CpServiceVPCast::PerceivedObjectSnapshot>& perceivedObjectSnapshot, const std::vector<std::size_t>& selectedObjects,
+Cpm createCollectivePerceptionMessageWeightedPP(const CpServiceWeightedPPersistence::VdpSnapshot& vdp, uint64_t referenceTime);
+void addOriginatingVehicleContainerWeightedPP(Cpm& message, const CpServiceWeightedPPersistence::VdpSnapshot& vdp);
+void addOriginatingRsuContainerWeightedPP(Cpm& message);
+void addSensorInformationContainerWeightedPP(Cpm& message, const std::vector<CpServiceWeightedPPersistence::SensorSnapshot>& sensorSnapshot);
+void addPerceptionRegionContainerWeightedPP(Cpm& message);
+void addPerceivedObjectContainerWeightedPP(
+    Cpm& message, const std::vector<CpServiceWeightedPPersistence::PerceivedObjectSnapshot>& perceivedObjectSnapshot, const std::vector<std::size_t>& selectedObjects,
     const omnetpp::SimTime& lastCpmTimestamp);
 
 
 }  // namespace artery
 
-#endif /* ARTERY_CPSERVICE_H_ */
+#endif /* ARTERY_CPSERVICE_WEIGHTEDPPERSISTENCE_H_ */

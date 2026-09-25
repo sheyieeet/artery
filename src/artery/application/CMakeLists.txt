@@ -7,6 +7,7 @@ target_sources(core PRIVATE
     CpServiceEtsi.cc
     CpServiceLookAhead.cc
     CpServiceStatic.cc
+    CpServiceWeightedPPersistence.cc
     CpServiceVPCast.cc
     CpObject.cc
     ExampleService.cc
