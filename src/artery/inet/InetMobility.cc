@@ -136,8 +136,12 @@ void InetVehicleMobility::initialize(int stage)
 
 double InetVehicleMobility::getMaxSpeed() const
 {
-    auto maxSpeed = mController->getMaxSpeed() / boost::units::si::meter_per_second;
-    return maxSpeed;
+    try {
+        auto maxSpeed = mController->getMaxSpeed() / boost::units::si::meter_per_second;
+        return maxSpeed;
+    } catch (...) {
+        return 33.0; // Vehicle despawned, return safe default to prevent INET cache crash
+    }
 }
 
 } // namespace artery

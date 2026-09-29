@@ -224,6 +224,7 @@ private:
     void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
     omnetpp::simsignal_t scSignalCpmExpectedDistance;
     omnetpp::simsignal_t scSignalCpmReceivedDistance;
+    omnetpp::simsignal_t scSignalCpmPacketSize;
 };
 
 Cpm createCollectivePerceptionMessage(const CpServiceEtsi::VdpSnapshot& vdp, uint64_t referenceTime);

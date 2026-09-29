@@ -216,6 +216,9 @@ private:
     uint32_t mTotalCpmSent = 0;
     uint32_t mTotalCpmReceived = 0;
     omnetpp::simsignal_t scSignalCpmPrr;
+    omnetpp::simsignal_t scSignalCpmExpectedDistance;
+    omnetpp::simsignal_t scSignalCpmReceivedDistance;
+    omnetpp::simsignal_t scSignalCpmPacketSize;
 
     // Weighted P-Persistence state
     struct BufferedMessage {

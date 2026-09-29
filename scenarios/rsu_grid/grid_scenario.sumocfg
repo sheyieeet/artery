@@ -2,7 +2,7 @@
 <configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.sf.net/xsd/sumoConfiguration.xsd">
     <input>
         <net-file value="grid_5x5/grid_scenario_traffic_light.net.xml"/>
-        <route-files value="grid_5x5/grid_scenario_v200.rou.xml"/>
+        <route-files value="grid_5x5/grid_scenario_v500.rou.xml"/>
 	    <additional-files value="grid_5x5/grid_scenario.poly.xml"/> 
     </input>
     

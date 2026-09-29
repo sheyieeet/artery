@@ -209,6 +209,7 @@ private:
     void updatePerceptionRate();
     omnetpp::simsignal_t scSignalCpmExpectedDistance;
     omnetpp::simsignal_t scSignalCpmReceivedDistance;
+    omnetpp::simsignal_t scSignalCpmPacketSize;
 };
 
 Cpm createCollectivePerceptionMessage(const CpService::VdpSnapshot& vdp, uint64_t referenceTime);

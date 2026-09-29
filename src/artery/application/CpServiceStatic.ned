@@ -28,6 +28,7 @@ simple CpServiceStatic like ItsG5Service
         @signal[CpmChannelLoad](type=double);
         @signal[cpmExpectedDistance](type=double);
 	@signal[cpmReceivedDistance](type=double);
+	@signal[cpmPacketSize](type=long);
 
         @statistic[reception](source="count(CpmReceived)";record=vector);
         @statistic[transmission](source="count(CpmSent)";record=vector);
@@ -39,6 +40,7 @@ simple CpServiceStatic like ItsG5Service
         @statistic[cpmChannelLoad](source=CpmChannelLoad; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmExpectedDistance](title="CPM Expected Distance"; source="cpmExpectedDistance"; record=vector);
         @statistic[cpmReceivedDistance](title="CPM Received Distance"; source="cpmReceivedDistance"; record=vector);
+        @statistic[cpmPacketSize](title="CPM Packet Size (Bytes)"; source="cpmPacketSize"; record=vector,mean);
 
         // evaluate DCC transmission interval restrictions
         bool withDccRestriction = default(true);

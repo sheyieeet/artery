@@ -237,6 +237,7 @@ private:
     void updatePerceptionRate();
     omnetpp::simsignal_t scSignalCpmExpectedDistance;
     omnetpp::simsignal_t scSignalCpmReceivedDistance;
+    omnetpp::simsignal_t scSignalCpmPacketSize;
     void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
 };
 

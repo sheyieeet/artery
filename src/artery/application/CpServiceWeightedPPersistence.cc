@@ -241,6 +241,9 @@ void CpServiceWeightedPPersistence::initialize()
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
     scSignalCpmPrr = registerSignal("cpmPrr");
+    scSignalCpmExpectedDistance = registerSignal("cpmExpectedDistance");
+    scSignalCpmReceivedDistance = registerSignal("cpmReceivedDistance");
+    scSignalCpmPacketSize = registerSignal("cpmPacketSize");
 
     // look up primary channel for CP
     mPrimaryChannel = getFacilities().get_const<MultiChannelPolicy>().primaryChannel(vanetza::aid::CP);
@@ -320,6 +323,12 @@ void CpServiceWeightedPPersistence::indicate(const vanetza::btp::DataIndication&
         if (mTotalCpmSent > 0) {
             emit(scSignalCpmPrr, (double)mTotalCpmReceived / mTotalCpmSent);
         }
+
+        double rxDistance = std::hypot(latDiffMeters, lonDiffMeters);
+        if (rxDistance > 0.0 && rxDistance <= 500.0) {
+            emit(scSignalCpmReceivedDistance, rxDistance);
+        }
+
         emit(scSignalCpmReceived, &obj);
 
         // Log received CPM metrics
@@ -363,7 +372,9 @@ void CpServiceWeightedPPersistence::indicate(const vanetza::btp::DataIndication&
                                     try {
                                         dist = distance(historyPos, candidate->getCentrePoint()).value();
                                     } catch (const std::exception& e) {
-                                        continue;
+                                        continue; // Vehicle despawned, skip safely
+                                    } catch (...) {
+                                        continue; // Catch TraCI exceptions safely
                                     }
                                     if (dist < minDistance) {
                                         minDistance = dist;
@@ -491,8 +502,10 @@ void CpServiceWeightedPPersistence::indicate(const vanetza::btp::DataIndication&
                                     try {
                                         obj->getCentrePoint(); // Throws if vehicle was removed from SUMO
                                         isAlive = true;
+                                    } catch (const std::exception& e) {
+                                        continue; // Vehicle despawned, skip safely
                                     } catch (...) {
-                                        isAlive = false;
+                                        continue; // Catch TraCI exceptions safely
                                     }
                                 }
                             }
@@ -746,6 +759,8 @@ void CpServiceWeightedPPersistence::sendCpm(const SimTime& T_now)
         txSize += 5 + 35 * mSelectedCpmObjects.size();
     }
 
+    emit(scSignalCpmPacketSize, (long)txSize);
+
     using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
@@ -766,6 +781,32 @@ void CpServiceWeightedPPersistence::sendCpm(const SimTime& T_now)
     size_t numTxObjects = includeObjects ? mSelectedCpmObjects.size() : 0;
     emit(scSignalCpmTxObjectCount, (long)numTxObjects);
     writeMetricToCsv("TX_ObjectCount", numTxObjects);
+
+    if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
+        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
+        auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
+        for (const auto& objPtr : allObjects) {
+            try {
+                if (objPtr->getExternalId().empty() || objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+                auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
+                if (!traciObj) continue;
+                try {
+                    double dist = distance(egoPos, objPtr->getCentrePoint()).value();
+                    if (dist > 0.0 && dist <= 500.0) {
+                        emit(scSignalCpmExpectedDistance, dist);
+                    }
+                } catch (const std::exception& e) {
+                    continue; // Vehicle despawned, skip safely
+                } catch (...) {
+                    continue; // Catch TraCI exceptions safely
+                }
+            } catch (const std::exception& e) {
+                continue; // Skip this ghost object entirely
+            } catch (...) {
+                continue; // Catch all TraCI errors and skip this ghost object
+            }
+        }
+    }
 }
 
 // This is the custom function to filter and send cpm to selected downlink using custom inclusion rule in this research
@@ -805,8 +846,10 @@ void CpServiceWeightedPPersistence::sendSelectedLink(uint32_t targetVehicleId, c
                     try {
                         obj->getCentrePoint(); // Throws if vehicle was removed from SUMO
                         isAlive = true;
+                    } catch (const std::exception& e) {
+                        return; // Vehicle despawned, skip safely
                     } catch (...) {
-                        isAlive = false;
+                        return; // Catch TraCI exceptions safely
                     }
                 }
             }
@@ -1011,20 +1054,18 @@ CpServiceWeightedPPersistence::ObjectVdpSnapshotMap CpServiceWeightedPPersistenc
         }
 
         ObjectVdpSnapshot snap;
-        if (idRegistry) {
-            boost::optional<Identity> identity = idRegistry->lookup<IdentityRegistry::traci>(objPtr->getExternalId());
-            if (identity && identity->host) {
-                cModule* middlewareMod = identity->host->getSubmodule("middleware");
-                Middleware* middleware = dynamic_cast<Middleware*>(middlewareMod);
-                if (middleware) {
-                    const auto* vdp = middleware->getFacilities().get_const_ptr<VehicleDataProvider>();
-                    if (vdp) {
-                        snap.hasVdpData = true;
-                        snap.speed = vdp->speed();
-                        snap.heading = vdp->heading();
-                        snap.stationType = vdp->getStationType();
-                    }
-                }
+        auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
+        if (traciObj) {
+            try {
+                const VehicleDataProvider& vdpObj = traciObj->getVehicleData();
+                // Query TraCI inside the try-catch block
+                snap.speed = vdpObj.speed();
+                snap.heading = vdpObj.heading();
+                snap.stationType = vdpObj.getStationType();
+                snap.hasVdpData = true;
+            } catch (...) {
+                // Vehicle despawned mid-snapshot, safely fallback
+                snap.hasVdpData = false;
             }
         }
 
@@ -1104,8 +1145,10 @@ void CpServiceWeightedPPersistence::capturePerceivedObjectSnapshot(
         Position objectPos;
         try {
             objectPos = objPtr->getCentrePoint();
+        } catch (const std::exception& e) {
+            continue; // Vehicle despawned, skip safely
         } catch (...) {
-            continue; // Skip this object if it has left the simulation
+            continue; // Catch TraCI exceptions safely
         }
         snap.xCm = round(objectPos.x - egoPos.x, vanetza::units::si::meter * boost::units::si::centi);
         if (snap.xCm < Vanetza_ITS2_CartesianCoordinateLarge_negativeOutOfRange)
@@ -1730,7 +1773,9 @@ void CpServiceWeightedPPersistence::updatePerceptionRate()
         try {
             dist = distance(egoPos, obj->getCentrePoint()).value();
         } catch (const std::exception& e) {
-            continue;
+            continue; // Vehicle despawned, skip safely
+        } catch (...) {
+            continue; // Catch TraCI exceptions safely
         }
         if (dist > 0.0 && dist <= 500.0) {
             int binIdx = std::ceil(dist / 25.0) - 1;

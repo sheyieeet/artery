@@ -225,6 +225,7 @@ void CpService::initialize()
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
     scSignalCpmExpectedDistance = registerSignal("cpmExpectedDistance");
+    scSignalCpmPacketSize = registerSignal("cpmPacketSize");
     scSignalCpmReceivedDistance = registerSignal("cpmReceivedDistance");
 
     // look up primary channel for CP
@@ -306,7 +307,9 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
                             try {
                                 dist = distance(historyPos, candidate->getCentrePoint()).value();
                             } catch (const std::exception& e) {
-                                continue;
+                                continue; // Vehicle despawned, skip safely
+                            } catch (...) {
+                                continue; // Catch TraCI exceptions safely
                             }
                             if (dist < minDistance) {
                                 minDistance = dist;
@@ -438,6 +441,7 @@ void CpService::sendCpm(const SimTime& T_now)
     
     // Store size before passing payload
     size_t txSize = payload->size();
+    emit(scSignalCpmPacketSize, (long)txSize);
     this->request(request, std::move(payload));
 
     // Log TX CPM metrics
@@ -457,21 +461,27 @@ void CpService::sendCpm(const SimTime& T_now)
         Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
         auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
         for (const auto& objPtr : allObjects) {
-            if (objPtr->getExternalId().empty() || objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
-            
-            // CRITICAL FIX: Only count actual TraCI vehicles, ignore static map geometry
-            auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
-            if (!traciObj) continue;
-
             try {
-                double dist = distance(egoPos, objPtr->getCentrePoint()).value();
-                if (dist > 0.0 && dist <= 500.0) {
-                    emit(scSignalCpmExpectedDistance, dist);
+                if (objPtr->getExternalId().empty() || objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
+                
+                // CRITICAL FIX: Only count actual TraCI vehicles, ignore static map geometry
+                auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
+                if (!traciObj) continue;
+
+                try {
+                    double dist = distance(egoPos, objPtr->getCentrePoint()).value();
+                    if (dist > 0.0 && dist <= 500.0) {
+                        emit(scSignalCpmExpectedDistance, dist);
+                    }
+                } catch (const std::exception& e) { 
+                    continue; 
+                } catch (...) { 
+                    continue; 
                 }
-            } catch (const std::exception& e) { 
-                continue; 
-            } catch (...) { 
-                continue; 
+            } catch (const std::exception& e) {
+                continue; // Skip this ghost object entirely
+            } catch (...) {
+                continue; // Catch all TraCI errors and skip this ghost object
             }
         }
     }
@@ -586,11 +596,17 @@ CpService::ObjectVdpSnapshotMap CpService::captureObjectVdpSnapshot(const LocalE
         ObjectVdpSnapshot snap;
         auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
         if (traciObj) {
-            const VehicleDataProvider& vdpObj = traciObj->getVehicleData();
-            snap.hasVdpData = true;
-            snap.speed = vdpObj.speed();
-            snap.heading = vdpObj.heading();
-            snap.stationType = vdpObj.getStationType();
+            try {
+                const VehicleDataProvider& vdpObj = traciObj->getVehicleData();
+                // Query TraCI inside the try-catch block
+                snap.speed = vdpObj.speed();
+                snap.heading = vdpObj.heading();
+                snap.stationType = vdpObj.getStationType();
+                snap.hasVdpData = true;
+            } catch (...) {
+                // Vehicle despawned mid-snapshot, safely fallback
+                snap.hasVdpData = false;
+            }
         }
 
         snapshots.emplace(static_cast<uint32_t>(tracking.id()), std::move(snap));
@@ -670,7 +686,9 @@ void CpService::capturePerceivedObjectSnapshot(
         try {
             objectPos = objPtr->getCentrePoint();
         } catch (const std::exception& e) {
-            continue; // Skip this object if it has left the simulation
+            continue; // Vehicle despawned, skip safely
+        } catch (...) {
+            continue; // Catch TraCI exceptions safely
         }
         snap.xCm = round(objectPos.x - egoPos.x, vanetza::units::si::meter * boost::units::si::centi);
         if (snap.xCm < Vanetza_ITS2_CartesianCoordinateLarge_negativeOutOfRange)
@@ -1303,7 +1321,9 @@ void CpService::updatePerceptionRate()
         try {
             dist = distance(egoPos, obj->getCentrePoint()).value();
         } catch (const std::exception& e) {
-            continue;
+            continue; // Vehicle despawned, skip safely
+        } catch (...) {
+            continue; // Catch TraCI exceptions safely
         }
         if (dist > 0.0 && dist <= 500.0) {
             int binIdx = std::ceil(dist / 25.0) - 1;
