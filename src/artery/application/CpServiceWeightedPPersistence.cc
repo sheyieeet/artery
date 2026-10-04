@@ -783,15 +783,29 @@ void CpServiceWeightedPPersistence::sendCpm(const SimTime& T_now)
     writeMetricToCsv("TX_ObjectCount", numTxObjects);
 
     if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
-        Position egoPos = mVehicleDataProvider ? mVehicleDataProvider->position() : mVdpSnapshot.position;
         auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
+        
+        // Ego vehicle (Sender) coordinates in ETSI 1e7 format
+        double senderLat = static_cast<double>(mVdpSnapshot.referenceLatitude);
+        double senderLon = static_cast<double>(mVdpSnapshot.referenceLongitude);
+        
         for (const auto& objPtr : allObjects) {
             try {
                 if (objPtr->getExternalId().empty() || objPtr->getExternalId() == std::to_string(mVdpSnapshot.stationId)) continue;
                 auto traciObj = std::dynamic_pointer_cast<artery::TraCIEnvironmentModelObject>(objPtr);
                 if (!traciObj) continue;
                 try {
-                    double dist = distance(egoPos, objPtr->getCentrePoint()).value();
+                    // Target object (Receiver) coordinates converted to 1e7
+                    double receiverLat = (traciObj->getVehicleData().latitude() / vanetza::units::degree) * 1e7;
+                    double receiverLon = (traciObj->getVehicleData().longitude() / vanetza::units::degree) * 1e7;
+
+                    // ETSI 0.111 flat-earth math
+                    double latDiffMeters = (senderLat - receiverLat) * 0.011132;
+                    double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
+                    double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
+
+                    double dist = std::hypot(latDiffMeters, lonDiffMeters);
+                    
                     if (dist > 0.0 && dist <= 500.0) {
                         emit(scSignalCpmExpectedDistance, dist);
                     }
