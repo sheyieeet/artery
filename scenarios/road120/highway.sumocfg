@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>>
+<input>
+        <net-file value="highway.net.xml"/>
+        <route-files value="highway.rou.xml"/>
+    </input>
+    <time>
+        <begin value="0"/>
+        <step-length value="0.1"/>
+        <end value="3600"/>
+    </time>
+    <processing>
+        <time-to-teleport value="-1"/> 
+    </processing>
+    <report>
+        <no-warnings value="true"/>
+    </report>
+</configuration>

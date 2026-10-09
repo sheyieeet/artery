@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<nodes>
+    <node id="rsu[0]" type="artery.inet.RoadsideUnit" x="500.0" y="15.0" z="5.0" />
+    <node id="rsu[1]" type="artery.inet.RoadsideUnit" x="2000.0" y="15.0" z="5.0" />
+    <node id="rsu[2]" type="artery.inet.RoadsideUnit" x="3500.0" y="15.0" z="5.0" />
+    <node id="rsu[3]" type="artery.inet.RoadsideUnit" x="5000.0" y="15.0" z="5.0" />
+    <node id="rsu[4]" type="artery.inet.RoadsideUnit" x="6500.0" y="15.0" z="5.0" />
+    <node id="rsu[5]" type="artery.inet.RoadsideUnit" x="8000.0" y="15.0" z="5.0" />
+    <node id="rsu[6]" type="artery.inet.RoadsideUnit" x="9500.0" y="15.0" z="5.0" />
+</nodes>
