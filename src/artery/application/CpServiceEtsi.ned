@@ -20,6 +20,10 @@ simple CpServiceEtsi like ItsG5Service
     parameters:
         @signal[CpmReceived](type=CpObject);
         @signal[CpmSent](type=CpObject);
+        // Application submissions; independent of MAC/PHY transmission success.
+        @signal[CpmSubmitted](type=long);
+        @signal[CpmTxWindowBytes](type=long);
+        @signal[CpmTxWindowDuration](type=double);
         @signal[CpmObjectUpdateInterval](type=double);
         @signal[CpmRxThroughput](type=double);
         @signal[CpmRxObjectCount](type=long);
@@ -31,16 +35,20 @@ simple CpServiceEtsi like ItsG5Service
 	@signal[cpmPacketSize](type=long);
 
         @statistic[reception](source="count(CpmReceived)";record=vector);
-        @statistic[transmission](source="count(CpmSent)";record=vector);
+        @statistic[transmission](title="CPM application submissions"; source="count(CpmSubmitted)"; record=vector);
         @statistic[cpmObjectUpdateInterval](source=CpmObjectUpdateInterval; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmRxThroughput](source=CpmRxThroughput; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmRxObjectCount](source=CpmRxObjectCount; record=vector,mean,max,min; interpolationmode=none);
-        @statistic[cpmTxThroughput](source=CpmTxThroughput; record=vector,mean,max,min; interpolationmode=none);
+        // Partial windows carry their active duration; use sum(bytes)*8/sum(duration)
+        // for an exposure-weighted station mean, not the unweighted sample mean.
+        @statistic[cpmTxThroughput](source=CpmTxThroughput; record=vector,max,min; interpolationmode=none);
+        @statistic[cpmTxWindowBytes](source=CpmTxWindowBytes; record=vector,sum; unit=B; interpolationmode=none);
+        @statistic[cpmTxWindowDuration](source=CpmTxWindowDuration; record=vector,sum; unit=s; interpolationmode=none);
         @statistic[cpmTxObjectCount](source=CpmTxObjectCount; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmChannelLoad](source=CpmChannelLoad; record=vector,mean,max,min; interpolationmode=none);
         @statistic[cpmExpectedDistance](title="CPM Expected Distance"; source="cpmExpectedDistance"; record=vector);
         @statistic[cpmReceivedDistance](title="CPM Received Distance"; source="cpmReceivedDistance"; record=vector);
-        @statistic[cpmPacketSize](title="CPM Packet Size (Bytes)"; source="cpmPacketSize"; record=vector,mean);
+        @statistic[cpmPacketSize](title="Encoded CPM application payload size (Bytes)"; source="cpmPacketSize"; record=vector,mean);
 
         // evaluate DCC transmission interval restrictions
         bool withDccRestriction = default(true);

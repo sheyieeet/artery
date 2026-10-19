@@ -1,6 +1,7 @@
 target_sources(core PRIVATE
     AntennaMobility.cc
     ChannelLoadRx.cc
+    CpmLinkPrrObserver.cc
     DistanceSwitchPathLoss.cc
     InetRadioDriver.cc
     InetMobility.cc

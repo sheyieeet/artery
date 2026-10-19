@@ -159,7 +159,7 @@ void Middleware::initializeServices(int stage)
                 mTransportDispatcher.addPromiscuousListener(promiscuous, channel::CCH);
             }
 
-            mServices.emplace(service);
+            mServices.push_back(service);
 
             // finalize module initialization now
             for (int i = 0; i < stage; ++i) {

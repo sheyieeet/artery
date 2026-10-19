@@ -10,6 +10,8 @@ target_sources(core PRIVATE
     CpServiceWeightedPPersistence.cc
     CpServiceVPCast.cc
     CpObject.cc
+    CpmService.cc
+    CpmObjectFreshnessObserver.cc
     ExampleService.cc
     GbcMockMessage.cc
     GbcMockService.cc

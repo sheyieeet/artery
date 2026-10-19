@@ -6,7 +6,8 @@
 #ifndef ARTERY_CPSERVICE_WEIGHTEDPPERSISTENCE_H_
 #define ARTERY_CPSERVICE_WEIGHTEDPPERSISTENCE_H_
 
-#include "artery/application/ItsG5BaseService.h"
+#include "artery/application/CpmService.h"
+#include "artery/application/CpmObjectProvenance.h"
 #include "artery/envmod/LocalEnvironmentModel.h"
 #include "artery/utility/Channel.h"
 #include "artery/utility/Geometry.h"
@@ -18,6 +19,9 @@
 #include <vanetza/units/velocity.hpp>
 
 #include <cstdint>
+#include <array>
+#include <map>
+#include <tuple>
 #include <limits>
 #include <optional>
 #include <unordered_map>
@@ -33,17 +37,17 @@ class NetworkInterfaceTable;
 class Timer;
 class VehicleDataProvider;
 
-class CpServiceWeightedPPersistence : public ItsG5BaseService
+class CpServiceWeightedPPersistence : public CpmService
 {
 public:
     struct VdpSnapshot {
-        omnetpp::SimTime updated;
-        uint32_t stationId;
-        int stationType;  // vanetza::geonet::StationType as int
-        Position position;
-        long referenceLatitude;        // same encoding as mc.referencePosition.latitude
-        long referenceLongitude;       // same encoding as mc.referencePosition.longitude
-        long orientationAngleDeciDeg;  // same encoding as ovc.orientationAngle.value
+        omnetpp::SimTime updated = omnetpp::SimTime::ZERO;
+        uint32_t stationId = 0;
+        int stationType = static_cast<int>(vanetza::geonet::StationType::Unknown);
+        Position position{0.0, 0.0};
+        long referenceLatitude = 900000001;   // unavailable
+        long referenceLongitude = 1800000001; // unavailable
+        long orientationAngleDeciDeg = 36001; // unavailable
     };
 
     struct SensorSnapshot {
@@ -65,6 +69,7 @@ public:
     enum class PerceivedObjectType : std::uint8_t { Unknown = 0, TypeA, TypeB };
 
     struct PerceivedObjectSnapshot {
+        CpmObjectProvenance provenance; // measurement only; never encoded
         uint32_t lemId = 0;
         uint16_t cpsId = 0;
 
@@ -114,6 +119,7 @@ public:
 private:
 
 	struct RsuTrackedObstacle {
+        CpmObjectProvenance provenance; // follows cached state; not serialized
 		 long id;                        
 		 double x;                       
 		 double y;
@@ -153,7 +159,8 @@ private:
     const Timer* mTimer = nullptr;
     LocalDynamicMap* mLocalDynamicMap = nullptr;
     LocalEnvironmentModel* mLocalEnvironmentModel = nullptr;
-    VdpSnapshot mVdpSnapshot;
+    VdpSnapshot mVdpSnapshot{};
+    bool mVdpSnapshotValid = false; // coordinates (including zero) are not validity sentinels
 
     omnetpp::SimTime mGenCpmMin;
     omnetpp::SimTime mGenCpmMax;
@@ -197,13 +204,11 @@ private:
     std::vector<SensorSnapshot> mSensorSnapshot;
 
     // Custom metrics logging fields & helpers
-    omnetpp::SimTime mLastTxThroughputTime = omnetpp::SimTime::ZERO;
-    size_t mAccumulatedTxBytes = 0;
     omnetpp::SimTime mLastRxThroughputTime = omnetpp::SimTime::ZERO;
     size_t mAccumulatedRxBytes = 0;
     double mLastChannelLoad = 0.0;
     std::unordered_map<uint64_t, omnetpp::SimTime> mRxObjectLastUpdateTime;
-    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
+    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0) override;
     omnetpp::cMessage* cpmTimer = nullptr;
 
     // Perception rate
@@ -218,26 +223,42 @@ private:
     omnetpp::simsignal_t scSignalCpmPrr;
     omnetpp::simsignal_t scSignalCpmExpectedDistance;
     omnetpp::simsignal_t scSignalCpmReceivedDistance;
-    omnetpp::simsignal_t scSignalCpmPacketSize;
 
     // Weighted P-Persistence state
+    using MessageId = std::tuple<uint32_t, uint64_t, std::array<uint8_t, 32>>;
+    enum class ForwardingPhase { WAITING_PROBABILITY, WAITING_FALLBACK };
+    class ForwardingTimer;
     struct BufferedMessage {
-        double minDij;
-        bool heardRetransmission;
-        std::shared_ptr<vanetza::asn1::r2::Cpm> cpm;
-        omnetpp::cMessage* timer1;
-        omnetpp::cMessage* timer2;
-        int hops; // to track TTL if needed locally
+        double minDij = 0.0;
+        ForwardingPhase phase = ForwardingPhase::WAITING_PROBABILITY;
+        std::shared_ptr<const Cpm> cpm;
+        omnetpp::SimTime expirationTime;
+        ForwardingTimer* timer = nullptr;
     };
-    std::unordered_map<uint64_t, BufferedMessage> mBufferedMessages;
-    
-    double mWaitTime;
-    double mTau;
-    double mTransmissionRange;
+    std::map<MessageId, BufferedMessage> mBufferedMessages;
+    std::map<MessageId, omnetpp::SimTime> mSeenMessages;
+    std::multimap<omnetpp::SimTime, MessageId> mSeenExpiry;
+    omnetpp::cMessage* mForwardingExpiryTimer = nullptr;
+    omnetpp::cModule* mChannelLoadHost = nullptr;
+    bool mForwardingFinished = false;
 
-    void handleTimer1(omnetpp::cMessage* msg);
-    void handleTimer2(omnetpp::cMessage* msg);
-    void rebroadcastCpm(uint64_t packetId);
+    omnetpp::SimTime mWaitTime;
+    omnetpp::SimTime mTau;
+    omnetpp::SimTime mMaxCpmAge;
+    double mTransmissionRange = 0.0;
+
+    void initializeForwarding();
+    static MessageId identifyMessage(const Cpm&);
+    omnetpp::SimTime messageDeadline(const MessageId&) const;
+    void rememberMessage(const MessageId&, const omnetpp::SimTime&);
+    void rememberOriginated(const Cpm&);
+    void processForwarding(const vanetza::btp::DataIndication&, std::shared_ptr<const Cpm>);
+    std::optional<double> forwardingDistance(const vanetza::btp::DataIndication&) const;
+    void handleForwardingTimer(omnetpp::cMessage*);
+    bool rebroadcastCpm(const BufferedMessage&);
+    void discardForwarding(const MessageId&);
+    void expireForwarding();
+    void clearForwarding();
 
 };
 

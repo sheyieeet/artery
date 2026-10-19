@@ -38,10 +38,8 @@ using namespace omnetpp;
 
 static const simsignal_t scSignalCpmReceived = cComponent::registerSignal("CpmReceived");
 static const simsignal_t scSignalCpmSent = cComponent::registerSignal("CpmSent");
-static const simsignal_t scSignalCpmTxThroughput = cComponent::registerSignal("CpmTxThroughput");
 static const simsignal_t scSignalCpmRxThroughput = cComponent::registerSignal("CpmRxThroughput");
 static const simsignal_t scSignalCpmChannelLoad = cComponent::registerSignal("CpmChannelLoad");
-static const simsignal_t scSignalCpmTxObjectCount = cComponent::registerSignal("CpmTxObjectCount");
 static const simsignal_t scSignalCpmRxObjectCount = cComponent::registerSignal("CpmRxObjectCount");
 static const simsignal_t scSignalCpmObjectUpdateInterval = cComponent::registerSignal("CpmObjectUpdateInterval");
 
@@ -153,7 +151,7 @@ CpService::~CpService()
 
 void CpService::initialize()
 {
-    ItsG5BaseService::initialize();
+    CpmService::initialize();
     mNetworkInterfaceTable = getFacilities().get_const_ptr<NetworkInterfaceTable>();
     mVehicleDataProvider = getFacilities().get_const_ptr<VehicleDataProvider>();
     mTimer = getFacilities().get_const_ptr<Timer>();
@@ -162,6 +160,7 @@ void CpService::initialize()
 
     // avoid unreasonable high elapsed time values for newly inserted vehicles
     mLastCpmTimestamp = simTime();
+    mLastCpmDecisionTimestamp = simTime();
 
     // generation rate boundaries
     mGenCpmMin = par("minInterval");
@@ -195,6 +194,12 @@ void CpService::initialize()
     mRedundancyDistanceThreshold = par("redundancyDistanceThreshold").doubleValue() * vanetza::units::si::meter;
     mRedundancyHistoryLifetime = par("redundancyHistoryLifetime");
 
+    // Keep shared RSU and legacy scenario behavior unless explicitly enabled.
+    mUseProposedGenerationRules = par("useProposedGenerationRules");
+    if (mUseProposedGenerationRules && (mObjectInclusionConfig != 1 || mRedundancySuppressionMode != 1)) {
+        throw cRuntimeError("Proposed generation rules require objectInclusionConfig=1 and redundancySuppressionMode=1");
+    }
+
     mUnusedObjectIdRetentionPeriod = par("unusedObjectIdRetentionPeriod");
     mHaveStationId = false;
     mLastStationId = 0;
@@ -209,7 +214,6 @@ void CpService::initialize()
     mCpmSensorIdLastUsed.assign(kCpmSensorIdSpace, kNeverUsedSimTime);
     mSensorSnapshot.clear();
 
-    mLastTxThroughputTime = simTime();
     mLastRxThroughputTime = simTime();
     mLastChannelLoad = 0.0;
     if (findHost()) {
@@ -225,7 +229,6 @@ void CpService::initialize()
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
     scSignalCpmExpectedDistance = registerSignal("cpmExpectedDistance");
-    scSignalCpmPacketSize = registerSignal("cpmPacketSize");
     scSignalCpmReceivedDistance = registerSignal("cpmReceivedDistance");
 
     // look up primary channel for CP
@@ -244,6 +247,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
     const Cpm* cpm = boost::apply_visitor(visitor, *packet);
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper;
+        observeCpmObjectFreshness(this, obj);
         
 
         
@@ -258,7 +262,7 @@ void CpService::indicate(const vanetza::btp::DataIndication& ind, std::unique_pt
         double senderLat = static_cast<double>(mc.referencePosition.latitude);
         double senderLon = static_cast<double>(mc.referencePosition.longitude);
         // use our most recent VDP snapshot (captured at last CPM generation or initialized)
-        if (mVdpSnapshot.referenceLatitude == 0) {
+        if (!mVdpSnapshotValid) {
             captureVdpSnapshot();
         }
         double receiverLat = static_cast<double>(mVdpSnapshot.referenceLatitude);
@@ -364,14 +368,24 @@ void CpService::trigger()
 
 void CpService::checkTriggeringConditions(const SimTime& T_now)
 {
-    SimTime& T_GenCpm = mGenCpm;
     const SimTime& T_GenCpmMin = mGenCpmMin;
-    const SimTime& T_GenCpmMax = mGenCpmMax;
-    const SimTime T_GenCpmDcc = mDccRestriction ? genCpmDcc() : T_GenCpmMin;
-    const SimTime T_elapsed = T_now - mLastCpmTimestamp;
+    // Proposed decisions are periodic; lower-layer DCC still controls access.
+    // Preserve application-level DCC gating for services that have not opted in.
+    const SimTime T_GenCpm = !mUseProposedGenerationRules && mDccRestriction ? genCpmDcc() : T_GenCpmMin;
+    const SimTime& lastEvent = mUseProposedGenerationRules ? mLastCpmDecisionTimestamp : mLastCpmTimestamp;
+    const SimTime T_elapsed = T_now - lastEvent;
 
-    if (T_elapsed >= T_GenCpmDcc) {
+    if (T_elapsed >= T_GenCpm) {
+        if (mUseProposedGenerationRules) {
+            // A suppressed send still completes its periodic decision event.
+            mLastCpmDecisionTimestamp = T_now;
+        }
         sendCpm(T_now);
+        if (mUseProposedGenerationRules) {
+            // Algorithm 1: history contains receptions since the last decision,
+            // including when sendCpm returned without submitting a message.
+            mReceivedObjectsHistory.clear();
+        }
     }
 }
 
@@ -397,6 +411,16 @@ void CpService::sendCpm(const SimTime& T_now)
     captureSensorSnapshot(T_now, lemSensorsSnapshot);
     capturePerceivedObjectSnapshot(T_now, referenceTime, lemObjectsSnapshot, objectVdpSnapshots);
 
+    bool includePerceivedObjects = false;
+    if (mUseProposedGenerationRules) {
+        includePerceivedObjects = checkPerceivedObjectTrigger(T_now);
+        if (!includePerceivedObjects) {
+            // Suppress the entire CPM before container timestamps, CpmSent,
+            // network submission, or transmitted-byte accounting can change.
+            return;
+        }
+    }
+
     auto cpm = createCollectivePerceptionMessage(mVdpSnapshot, referenceTime);
 
     if (mVdpSnapshot.stationType == static_cast<int>(vanetza::geonet::StationType::RSU)) {
@@ -411,7 +435,10 @@ void CpService::sendCpm(const SimTime& T_now)
     if (checkPerceptionRegionTrigger()) {
         addPerceptionRegionContainer(cpm);
     }
-    if (checkPerceivedObjectTrigger(T_now)) {
+    if (!mUseProposedGenerationRules) {
+        includePerceivedObjects = checkPerceivedObjectTrigger(T_now);
+    }
+    if (includePerceivedObjects) {
         addPerceivedObjectContainer(cpm, mPerceivedObjectSnapshot, mSelectedCpmObjects, mLastCpmTimestamp);
     }
 
@@ -432,6 +459,7 @@ void CpService::sendCpm(const SimTime& T_now)
     request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
 
     CpObject obj(std::move(cpm));
+    if (includePerceivedObjects) attachCpmObjectProvenance(obj.shared_ptr(), mPerceivedObjectSnapshot, mSelectedCpmObjects);
     emit(scSignalCpmSent, &obj);
 
     using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
@@ -439,23 +467,7 @@ void CpService::sendCpm(const SimTime& T_now)
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
     payload->layer(OsiLayer::Application) = std::move(buffer);
     
-    // Store size before passing payload
-    size_t txSize = payload->size();
-    emit(scSignalCpmPacketSize, (long)txSize);
     this->request(request, std::move(payload));
-
-    // Log TX CPM metrics
-    mAccumulatedTxBytes += txSize;
-    double txInterval = (T_now - mLastTxThroughputTime).dbl();
-    if (txInterval >= 1.0) {
-        double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
-        emit(scSignalCpmTxThroughput, txThroughput);
-        mLastTxThroughputTime = T_now;
-        mAccumulatedTxBytes = 0;
-    }
-
-    size_t numTxObjects = mSelectedCpmObjects.size();
-    emit(scSignalCpmTxObjectCount, (long)numTxObjects);
 
     if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
         auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
@@ -555,6 +567,7 @@ void CpService::captureVdpSnapshot()
     if (mVdpSnapshot.referenceLongitude < -1800000000 || mVdpSnapshot.referenceLongitude > 1800000000) {
         mVdpSnapshot.referenceLongitude = 1800000001; // unavailable
     }
+    mVdpSnapshotValid = true;
 }
 
 void CpService::captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors)
@@ -667,6 +680,8 @@ void CpService::capturePerceivedObjectSnapshot(
                 lastDetected = trackingTime.last();
             }
         }
+        // Use the original sensor observation time, independent of wire delta sign/clamping.
+        snap.provenance = CpmObjectProvenance{objPtr, lastDetected, !tracking.sensors().empty()};
         int64_t lastDetectedTaiMs = countTaiMilliseconds(mTimer->getTimeFor(lastDetected));
         int64_t deltaTime = referenceTime - lastDetectedTaiMs;
         deltaTime = std::clamp(deltaTime, int64_t(-2048), int64_t(2047));
@@ -766,7 +781,8 @@ bool CpService::checkPerceptionRegionTrigger()
 
 bool CpService::checkPerceivedObjectTrigger(const SimTime& T_now)
 {
-    if (mRedundancySuppressionMode > 0) {
+    // Proposed history is consumed after each decision, not by a rolling TTL.
+    if (!mUseProposedGenerationRules && mRedundancySuppressionMode > 0) {
         mReceivedObjectsHistory.erase(
             std::remove_if(mReceivedObjectsHistory.begin(), mReceivedObjectsHistory.end(),
                 [&](const ReceivedObjectHistory& h) {
@@ -1279,7 +1295,7 @@ void CpService::finish()
     if (findHost()) {
         findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
     }
-    ItsG5BaseService::finish();
+    CpmService::finish();
 }
 
 void CpService::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details)
@@ -1306,7 +1322,7 @@ void CpService::updatePerceptionRate()
     auto globalEnv = mLocalEnvironmentModel->getGlobalEnvironmentModel();
     if (!globalEnv) return;
 
-    if (mVdpSnapshot.referenceLatitude == 0) {
+    if (!mVdpSnapshotValid) {
         captureVdpSnapshot();
     }
     Position egoPos;

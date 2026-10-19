@@ -11,6 +11,8 @@
 #include "artery/application/CpObject.h"
 #include "artery/application/MultiChannelPolicy.h"
 #include "artery/application/VehicleDataProvider.h"
+#include "artery/application/NetworkInterfaceTable.h"
+#include "artery/networking/Router.h"
 #include "artery/utility/IdentityRegistry.h"
 #include "artery/application/Middleware.h"
 #include "artery/envmod/GlobalEnvironmentModel.h"
@@ -28,6 +30,7 @@
 #include <vanetza/dcc/transmission.hpp>
 #include <vanetza/dcc/transmit_rate_control.hpp>
 #include <vanetza/geonet/station_type.hpp>
+#include <vanetza/security/sha.hpp>
 
 #include "veins/modules/mobility/traci/TraCIMobility.h"
 #include "veins/modules/mobility/traci/TraCICommandInterface.h"
@@ -45,10 +48,8 @@ using namespace omnetpp;
 
 static const simsignal_t scSignalCpmReceived = cComponent::registerSignal("CpmReceived");
 static const simsignal_t scSignalCpmSent = cComponent::registerSignal("CpmSent");
-static const simsignal_t scSignalCpmTxThroughput = cComponent::registerSignal("CpmTxThroughput");
 static const simsignal_t scSignalCpmRxThroughput = cComponent::registerSignal("CpmRxThroughput");
 static const simsignal_t scSignalCpmChannelLoad = cComponent::registerSignal("CpmChannelLoad");
-static const simsignal_t scSignalCpmTxObjectCount = cComponent::registerSignal("CpmTxObjectCount");
 static const simsignal_t scSignalCpmRxObjectCount = cComponent::registerSignal("CpmRxObjectCount");
 static const simsignal_t scSignalCpmObjectUpdateInterval = cComponent::registerSignal("CpmObjectUpdateInterval");
 
@@ -58,6 +59,13 @@ static constexpr uint32_t kInvalidLemId = std::numeric_limits<uint32_t>::max();
 static constexpr std::size_t kCpmSensorIdSpace = 256;
 static constexpr int kInvalidLemSensorId = -1;
 static constexpr const_simtime_t kNeverUsedSimTime = -1;
+
+class CpServiceVPCast::RebroadcastTimer : public cMessage
+{
+public:
+    explicit RebroadcastTimer(const MessageId& message) : cMessage("VP-CAST forwarding"), id(message) {}
+    MessageId id;
+};
 
 void setPOClassificationVPCast(Vanetza_ITS2_PerceivedObject_t& po, vanetza::geonet::StationType st)
 {
@@ -156,16 +164,17 @@ CpServiceVPCast::CpServiceVPCast() : mGenCpmMin{100, SIMTIME_MS}, mGenCpmMax{100
 
 CpServiceVPCast::~CpServiceVPCast()
 {
-    if (findHost()) {
-        try {
-            findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
-        } catch (...) {}
+    clearForwarding();
+    cancelAndDelete(mCpmTimer);
+    if (mChannelLoadHost) {
+        mChannelLoadHost->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
     }
 }
 
 void CpServiceVPCast::initialize()
 {
-    ItsG5BaseService::initialize();
+    CpmService::initialize();
+    initializeForwarding();
     mNetworkInterfaceTable = getFacilities().get_const_ptr<NetworkInterfaceTable>();
     mVehicleDataProvider = getFacilities().get_const_ptr<VehicleDataProvider>();
     mIdentity = getFacilities().get_const_ptr<Identity>();
@@ -227,7 +236,6 @@ void CpServiceVPCast::initialize()
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
     scSignalCpmExpectedDistance = registerSignal("cpmExpectedDistance");
-    scSignalCpmPacketSize = registerSignal("cpmPacketSize");
     scSignalCpmReceivedDistance = registerSignal("cpmReceivedDistance");
 
     // look up primary channel for CP
@@ -236,22 +244,22 @@ void CpServiceVPCast::initialize()
     const auto stationType = mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU;
 
     // Initialize custom metrics tracking fields
-    mLastTxThroughputTime = simTime();
-    mAccumulatedTxBytes = 0;
     mLastRxThroughputTime = simTime();
     mAccumulatedRxBytes = 0;
     mLastChannelLoad = 0.0;
     mRxObjectLastUpdateTime.clear();
 
-    if (findHost()) {
-        findHost()->subscribe(RadioDriverBase::ChannelLoadSignal, this);
+    mChannelLoadHost = findHost();
+    if (mChannelLoadHost) {
+        mChannelLoadHost->subscribe(RadioDriverBase::ChannelLoadSignal, this);
     }
 
     mCpmTimer = new cMessage("CpmTimer");
     scheduleAt(simTime() + 0.1, mCpmTimer);
 }
 
-void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::unique_ptr<vanetza::UpPacket> packet)
+void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind,
+    std::unique_ptr<vanetza::UpPacket> packet, const NetworkInterface& network)
 {
     Enter_Method("indicate");
 
@@ -261,17 +269,15 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
     // receive CPM
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper; 
+        observeCpmObjectFreshness(this, obj);
 
         // Log received CPM metrics
         const Vanetza_ITS2_CPM_PDU_Descriptions_ManagementContainer_t& mc = (**cpm).payload.managementContainer;
         uint32_t senderVehicleId = (**cpm).header.stationId;
-        std::string refTimeStr;
         uint64_t refTimeInt = 0;
         for (int i = 0; i < mc.referenceTime.size; ++i) {
-            refTimeStr += std::to_string(mc.referenceTime.buf[i]);
             refTimeInt = (refTimeInt << 8) | mc.referenceTime.buf[i];
         }
-        std::string msgId = std::to_string(senderVehicleId) + "_" + refTimeStr;
 
         size_t numRxObjects = 0;
         size_t numRxSensors = 0;
@@ -288,7 +294,7 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
 
         double senderLat = static_cast<double>(mc.referencePosition.latitude);
         double senderLon = static_cast<double>(mc.referencePosition.longitude);
-        if (mVdpSnapshot.referenceLatitude == 0) {
+        if (!mVdpSnapshotValid) {
             captureVdpSnapshot();
         }
         double receiverLat = static_cast<double>(mVdpSnapshot.referenceLatitude);
@@ -298,51 +304,10 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
         double refLatRad = receiverLat * 1e-7 * M_PI / 180.0;
         double lonDiffMeters = (senderLon - receiverLon) * 0.011132 * std::cos(refLatRad);
 
-        bool isRsu = (mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU) == vanetza::geonet::StationType::RSU;
+        // Forwarding history is separate from the legacy object-processing
+        // watermark. Duplicates must reach cancellation even when already seen.
+        processForwarding(ind, visitor.shared_wrapper, network);
 
-        if (!isRsu) {
-            double egoHeading = mVehicleDataProvider ? mVehicleDataProvider->heading().value() : 0.0;
-            double hx = std::sin(egoHeading * M_PI / 180.0);
-            double hy = std::cos(egoHeading * M_PI / 180.0);
-            double dotProduct = lonDiffMeters * hx + latDiffMeters * hy;
-            bool isBackVehicle = (dotProduct < 0);
-
-            auto it = mRebroadcastStates.find(msgId);
-            if (it == mRebroadcastStates.end()) {
-                int slotMax = 5;
-                double egoSpeed = mVehicleDataProvider ? mVehicleDataProvider->speed().value() : 0.0;
-                double vr = std::max(0.0, std::min(egoSpeed / 30.0, 1.0));
-                double nSlots = (1.0 - slotMax) * vr + slotMax;
-                double distance = std::sqrt(latDiffMeters * latDiffMeters + lonDiffMeters * lonDiffMeters);
-                double P = std::min(distance / 500.0, 1.0);
-                double waitT = nSlots * (1.0 - P);
-
-                RebroadcastState state;
-                state.msgId = msgId;
-                state.cpm = visitor.shared_wrapper;
-                state.phase = RebroadcastPhase::WAITING_T;
-                state.expirationTime = simTime() + 1.0; 
-                
-                cMessage* timerMsg = new cMessage("RebroadcastTimer_T");
-                timerMsg->setContextPointer(new std::string(msgId));
-                state.timerMsg = timerMsg;
-                
-                mRebroadcastStates[msgId] = state;
-                scheduleAt(simTime() + waitT, timerMsg);
-            } else {
-                if (it->second.phase == RebroadcastPhase::WAITING_T1 || it->second.phase == RebroadcastPhase::WAITING_T) {
-                    if (isBackVehicle) {
-                        if (it->second.timerMsg) {
-                            cancelAndDelete(it->second.timerMsg);
-                            it->second.timerMsg = nullptr;
-                        }
-                        mRebroadcastStates.erase(it);
-                    }
-                }
-            }
-        }
-
-        
         if (!isDuplicate) {
             auto& containerList = (**cpm).payload.cpmContainers.list;
             for (int c_idx = 0; c_idx < containerList.count; ++c_idx) {
@@ -491,6 +456,7 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
                     } 
                     
                     RsuTrackedObstacle newObs;
+                    newObs.provenance = lookupCpmObjectProvenance(obj.shared_ptr(), po);
                     newObs.speed = obsSpeed;
                     newObs.heading = obsHeading;
 
@@ -553,6 +519,7 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
                         mGlobalObstaclesList[objId].lastUpdateTime = t_now;
                         mGlobalObstaclesList[objId].speed = obsSpeed;
                         mGlobalObstaclesList[objId].heading = obsHeading;
+                        mGlobalObstaclesList[objId].provenance = newObs.provenance;
                     }
                 }
             }
@@ -572,6 +539,7 @@ void CpServiceVPCast::indicate(const vanetza::btp::DataIndication& ind, std::uni
                         it1->second.x = it2->second.x;
                         it1->second.y = it2->second.y;
                         it1->second.lastUpdateTime = it2->second.lastUpdateTime;
+                        it1->second.provenance = it2->second.provenance;
                     }
                     it2 = mGlobalObstaclesList.erase(it2); 
                 } else {
@@ -676,43 +644,15 @@ void CpServiceVPCast::sendCpm(const SimTime& T_now)
     request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
     request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
     CpObject obj(std::move(cpm));
+    if (includeObjects) attachCpmObjectProvenance(obj.shared_ptr(), mPerceivedObjectSnapshot, mSelectedCpmObjects);
+    rememberOriginated(obj.asn1());
     emit(scSignalCpmSent, &obj);
-
-    // Estimate size of CPM safely
-    size_t txSize = 22; // Header + Management Container
-    if (mVdpSnapshot.stationType == static_cast<int>(vanetza::geonet::StationType::RSU)) {
-        txSize += 4;
-    } else {
-        txSize += 35;
-    }
-    if (checkSensorInformationTrigger(T_now)) {
-        txSize += 10 + 20 * mSensorSnapshot.size();
-    }
-    if (includeObjects) {
-        txSize += 5 + 35 * mSelectedCpmObjects.size();
-    }
 
     using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
     payload->layer(OsiLayer::Application) = std::move(buffer);
     this->request(request, std::move(payload));
-
-    // Log TX CPM metrics
-    emit(scSignalCpmPacketSize, (long)txSize);
-    mAccumulatedTxBytes += txSize;
-    double txInterval = (T_now - mLastTxThroughputTime).dbl();
-    if (txInterval >= 1.0) {
-        double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
-        emit(scSignalCpmTxThroughput, txThroughput);
-        writeMetricToCsv("TX_Throughput", txThroughput);
-        mLastTxThroughputTime = T_now;
-        mAccumulatedTxBytes = 0;
-    }
-
-    size_t numTxObjects = includeObjects ? mSelectedCpmObjects.size() : 0;
-    emit(scSignalCpmTxObjectCount, (long)numTxObjects);
-    writeMetricToCsv("TX_ObjectCount", numTxObjects);
 
     if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
         auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
@@ -791,6 +731,7 @@ void CpServiceVPCast::sendSelectedLink()
         if (include) {
             CpServiceVPCast::PerceivedObjectSnapshot snap;
             snap.cpsId = target.id;
+            snap.provenance = target.provenance;
             
             double relToRsuX = target.x - rsuGlobalX;
             double relToRsuY = target.y - rsuGlobalY;
@@ -833,31 +774,15 @@ void CpServiceVPCast::sendSelectedLink()
         request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
 
         CpObject obj(std::move(responseCpm));
+        attachCpmObjectProvenance(obj.shared_ptr(), selectedSnapshots, selectedIndices);
+        rememberOriginated(obj.asn1());
         emit(scSignalCpmSent, &obj);
-
-        size_t txSize = 22 + 4; // Header + Management Container + RSU Container
-        txSize += 5 + 35 * selectedSnapshots.size();
 
         std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
         std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
         payload->layer(OsiLayer::Application) = std::move(buffer);
         this->request(request, std::move(payload));
 
-        // Log TX CPM metrics
-        emit(scSignalCpmPacketSize, (long)txSize);
-        mAccumulatedTxBytes += txSize;
-        double txInterval = (t_now - mLastTxThroughputTime).dbl();
-        if (txInterval >= 1.0) {
-            double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
-            emit(scSignalCpmTxThroughput, txThroughput);
-            writeMetricToCsv("TX_Throughput", txThroughput);
-            mLastTxThroughputTime = t_now;
-            mAccumulatedTxBytes = 0;
-        }
-
-        size_t numTxObjects = selectedSnapshots.size();
-        emit(scSignalCpmTxObjectCount, (long)numTxObjects);
-        writeMetricToCsv("TX_ObjectCount", numTxObjects);
     }
 }
 
@@ -915,6 +840,7 @@ void CpServiceVPCast::captureVdpSnapshot()
     if (mVdpSnapshot.referenceLongitude < -1800000000 || mVdpSnapshot.referenceLongitude > 1800000000) {
         mVdpSnapshot.referenceLongitude = 1800000001; // unavailable
     }
+    mVdpSnapshotValid = true;
 }
 
 void CpServiceVPCast::captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors)
@@ -1030,6 +956,8 @@ void CpServiceVPCast::capturePerceivedObjectSnapshot(
                 lastDetected = trackingTime.last();
             }
         }
+        // Use the original sensor observation time, independent of wire delta sign/clamping.
+        snap.provenance = CpmObjectProvenance{objPtr, lastDetected, !tracking.sensors().empty()};
         int64_t lastDetectedTaiMs = countTaiMilliseconds(mTimer->getTimeFor(lastDetected));
         int64_t deltaTime = referenceTime - lastDetectedTaiMs;
         deltaTime = std::clamp(deltaTime, int64_t(-2048), int64_t(2047));
@@ -1581,16 +1509,214 @@ void addPerceivedObjectContainer(
     }
 }
 
+void CpServiceVPCast::initializeForwarding()
+{
+    mForwardT1 = par("t1Max");
+    mForwardT2 = par("t2");
+    mForwardT3 = par("t3");
+    mSlotDuration = par("slotDuration");
+    mForwardRange = par("commRange").doubleValue();
+    mForwardMaxSpeed = par("maxVehicleSpeed").doubleValue();
+    mForwardSlots = par("slotMax").doubleValue();
+    if (mForwardT1 <= SimTime::ZERO || mForwardT2 <= SimTime::ZERO ||
+            mForwardT3 <= SimTime::ZERO || mSlotDuration <= SimTime::ZERO ||
+            !std::isfinite(mForwardRange) || mForwardRange <= 0.0 ||
+            !std::isfinite(mForwardMaxSpeed) || mForwardMaxSpeed <= 0.0 ||
+            !std::isfinite(mForwardSlots) || mForwardSlots < 1.0 ||
+            par("nominalVehicleSpacing").doubleValue() <= 0.0)
+        throw cRuntimeError("VP-CAST requires positive times, range, speed and spacing, and at least one slot");
+    mForwardingExpiryTimer = new cMessage("VP-CAST seen-message expiry");
+}
+
+CpServiceVPCast::MessageId CpServiceVPCast::identifyMessage(const Cpm& cpm)
+{
+    uint64_t reference = 0;
+    if (asn_INTEGER2uint64(&cpm->payload.managementContainer.referenceTime, &reference) != 0)
+        throw cRuntimeError("Cannot decode VP-CAST CPM referenceTime");
+    const auto encoded = cpm.encode();
+    const auto digest = vanetza::security::calculate_sha256_digest(encoded.data(), encoded.size());
+    return MessageId{cpm->header.stationId, reference, digest};
+}
+
+SimTime CpServiceVPCast::messageDeadline(const MessageId& id) const
+{
+    // Approved CPM adaptation: T3 is absolute CPM age, including initial T.
+    // Convert the full TAI timestamp, not the wrapping GN timestamp or a local
+    // reception time. A later relay cannot renew the original information.
+    const vanetza::Clock::time_point reference{std::chrono::milliseconds(std::get<1>(id))};
+    const auto now = mTimer->getCurrentTime();
+    if (reference > now) return SimTime::ZERO; // invalid future timestamp
+    const auto deadline = reference + std::chrono::microseconds(mForwardT3.inUnit(SIMTIME_US));
+    if (deadline <= now) return SimTime::ZERO;
+    return mTimer->getTimeFor(deadline);
+}
+
+void CpServiceVPCast::rememberMessage(const MessageId& id, const SimTime& deadline)
+{
+    if (!mSeenMessages.emplace(id, deadline).second) return;
+    mSeenExpiry.emplace(deadline, id);
+    const auto next = mSeenExpiry.begin()->first;
+    if (!mForwardingExpiryTimer->isScheduled() || mForwardingExpiryTimer->getArrivalTime() != next) {
+        cancelEvent(mForwardingExpiryTimer);
+        scheduleAt(next, mForwardingExpiryTimer);
+    }
+}
+
+void CpServiceVPCast::rememberOriginated(const Cpm& cpm)
+{
+    expireForwarding();
+    const auto id = identifyMessage(cpm);
+    const auto deadline = messageDeadline(id);
+    if (deadline > simTime()) rememberMessage(id, deadline);
+}
+
+bool CpServiceVPCast::isBehind(double east, double north, double headingRadians)
+{
+    // Heading is true-north clockwise. east/north are geographical axes,
+    // independent of OMNeT++'s downward-positive Cartesian Y coordinate.
+    return east * std::sin(headingRadians) + north * std::cos(headingRadians) < 0.0;
+}
+
+double CpServiceVPCast::forwardingWait(double senderSpeed, double receiverSpeed, double distance,
+    double maxSpeed, double range, double slots, double slotDuration)
+{
+    const double velocityRatio = std::clamp((senderSpeed + receiverSpeed) / (2.0 * maxSpeed), 0.0, 1.0);
+    const double n = (1.0 - slots) * velocityRatio + slots;
+    const double p = std::clamp(distance / range, 0.0, 1.0);
+    return n * (1.0 - p) * slotDuration;
+}
+
+void CpServiceVPCast::processForwarding(const vanetza::btp::DataIndication& ind,
+    std::shared_ptr<const Cpm> cpm, const NetworkInterface& network)
+{
+    if (mForwardingFinished || !mVehicleDataProvider ||
+            mVehicleDataProvider->getStationType() == vanetza::geonet::StationType::RSU) return;
+    expireForwarding();
+    const auto id = identifyMessage(*cpm);
+    const auto deadline = messageDeadline(id);
+    if (deadline <= simTime()) return;
+    const auto active = mRebroadcastStates.find(id);
+    if (active == mRebroadcastStates.end() && mSeenMessages.count(id)) return;
+
+    // Each application relay creates a fresh SHB PDU. Its GN source is the
+    // immediate forwarder, while the encapsulated CPM origin remains unchanged.
+    const double senderLatitude = vanetza::units::GeoAngle{ind.source_position.latitude}.value();
+    const double senderLongitude = vanetza::units::GeoAngle{ind.source_position.longitude}.value();
+    const double latitude = mVehicleDataProvider->latitude().value();
+    const double longitude = mVehicleDataProvider->longitude().value();
+    const double heading = mVehicleDataProvider->heading().value(); // already radians
+    if (!std::isfinite(latitude) || !std::isfinite(longitude) || !std::isfinite(heading) ||
+            std::abs(latitude) > 90.0 || std::abs(longitude) > 180.0 ||
+            std::abs(senderLatitude) > 90.0 || std::abs(senderLongitude) > 180.0) return;
+    const double north = (senderLatitude - latitude) * 111320.0;
+    const double longitudeDelta = std::remainder(senderLongitude - longitude, 360.0);
+    const double east = longitudeDelta * 111320.0 * std::cos(latitude * M_PI / 180.0);
+
+    if (active != mRebroadcastStates.end()) {
+        // A duplicate remains useful feedback in T, T1 AND active SCF.
+        if (isBehind(east, north, heading)) discardForwarding(id);
+        return;
+    }
+
+    // SHB processing updated this local GN table before the BTP indication.
+    // No CAM requirement, global environment lookup, or CPM format extension.
+    const auto* forwarder = network.getRouter().getLocationTable().get_position(ind.source_position.gn_addr);
+    if (!forwarder || !vanetza::geonet::is_valid(*forwarder)) return;
+    // GN encodes speed as an unsigned integer in centimetres per second.
+    const double senderSpeed = static_cast<double>(forwarder->speed.value().raw()) * 0.01;
+    const double receiverSpeed = mVehicleDataProvider->speed().value();
+    if (!std::isfinite(senderSpeed) || !std::isfinite(receiverSpeed) || senderSpeed < 0.0 || receiverSpeed < 0.0) return;
+    const auto wait = SimTime(forwardingWait(senderSpeed, receiverSpeed, std::hypot(east, north),
+        mForwardMaxSpeed, mForwardRange, mForwardSlots, mSlotDuration.dbl()));
+
+    rememberMessage(id, deadline);
+    RebroadcastState state;
+    state.cpm = std::move(cpm);
+    state.expirationTime = deadline;
+    state.timerMsg = new RebroadcastTimer(id);
+    const auto timer = state.timerMsg;
+    mRebroadcastStates.emplace(id, std::move(state));
+    // Even T longer than the remaining validity expires without submitting.
+    scheduleAt(std::min(simTime() + wait, deadline), timer);
+}
+
+void CpServiceVPCast::discardForwarding(const MessageId& id)
+{
+    const auto it = mRebroadcastStates.find(id);
+    if (it == mRebroadcastStates.end()) return;
+    cancelAndDelete(it->second.timerMsg);
+    mRebroadcastStates.erase(it); // releases the cached CPM; seen key stays
+}
+
+void CpServiceVPCast::expireForwarding()
+{
+    while (!mSeenExpiry.empty() && mSeenExpiry.begin()->first <= simTime()) {
+        const auto id = mSeenExpiry.begin()->second;
+        discardForwarding(id);
+        mSeenMessages.erase(id);
+        mSeenExpiry.erase(mSeenExpiry.begin());
+    }
+    if (mForwardingExpiryTimer) {
+        if (mSeenExpiry.empty()) {
+            cancelEvent(mForwardingExpiryTimer);
+        } else {
+            const auto next = mSeenExpiry.begin()->first;
+            if (!mForwardingExpiryTimer->isScheduled() || mForwardingExpiryTimer->getArrivalTime() != next) {
+                cancelEvent(mForwardingExpiryTimer);
+                scheduleAt(next, mForwardingExpiryTimer);
+            }
+        }
+    }
+}
+
+void CpServiceVPCast::clearForwarding()
+{
+    mForwardingFinished = true;
+    for (auto& item : mRebroadcastStates) cancelAndDelete(item.second.timerMsg);
+    mRebroadcastStates.clear();
+    mSeenMessages.clear();
+    mSeenExpiry.clear();
+    cancelAndDelete(mForwardingExpiryTimer);
+    mForwardingExpiryTimer = nullptr;
+}
+
+bool CpServiceVPCast::submitForwarded(const RebroadcastState& state)
+{
+    if (simTime() >= state.expirationTime) return false;
+    // GN lifetime has 50 ms minimum granularity. Round DOWN so DCC does not
+    // receive a newly renewed one-second lifetime after the CPM age deadline.
+    // Keep the previous one-second per-submission network-lifetime ceiling.
+    const auto remaining = std::min(SimTime(1, SIMTIME_S), state.expirationTime - simTime());
+    const auto intervals = remaining.raw() / SimTime(50, SIMTIME_MS).raw();
+    if (intervals <= 0) return false; // cannot express a positive valid lifetime
+    using namespace vanetza;
+    btp::DataRequestB req;
+    req.destination_port = btp::ports::CPM;
+    req.gn.its_aid = aid::CP;
+    req.gn.transport_type = geonet::TransportType::SHB;
+    req.gn.maximum_lifetime = geonet::Lifetime{geonet::Lifetime::Base::Fifty_Milliseconds,
+        static_cast<uint8_t>(intervals)};
+    req.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
+    req.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
+    CpObject object(state.cpm);
+    emit(scSignalCpmSent, &object);
+    auto payload = std::make_unique<geonet::DownPacket>();
+    payload->layer(OsiLayer::Application) = std::unique_ptr<convertible::byte_buffer>(
+        new convertible::byte_buffer_impl<Cpm>(state.cpm));
+    this->request(req, std::move(payload)); // unchanged common submission accounting
+    return true;
+}
+
 void CpServiceVPCast::finish()
 {
-    if (mCpmTimer) {
-        cancelAndDelete(mCpmTimer);
-        mCpmTimer = nullptr;
+    clearForwarding();
+    cancelAndDelete(mCpmTimer);
+    mCpmTimer = nullptr;
+    if (mChannelLoadHost) {
+        mChannelLoadHost->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
+        mChannelLoadHost = nullptr;
     }
-    if (findHost()) {
-        findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
-    }
-    ItsG5BaseService::finish();
+    CpmService::finish();
 }
 
 void CpServiceVPCast::handleMessage(omnetpp::cMessage* msg)
@@ -1598,85 +1724,37 @@ void CpServiceVPCast::handleMessage(omnetpp::cMessage* msg)
     if (msg == mCpmTimer) {
         sendSelectedLink();
         scheduleAt(simTime() + 0.1, mCpmTimer);
-    } else if (msg->isName("RebroadcastTimer_T")) {
+    } else if (msg == mForwardingExpiryTimer) {
+        expireForwarding();
+    } else if (dynamic_cast<RebroadcastTimer*>(msg)) {
         handleRebroadcastTimer(msg);
     } else {
-        ItsG5BaseService::handleMessage(msg);
+        CpmService::handleMessage(msg);
     }
 }
 
-void CpServiceVPCast::handleRebroadcastTimer(omnetpp::cMessage* msg)
+void CpServiceVPCast::handleRebroadcastTimer(omnetpp::cMessage* message)
 {
-    std::string* pMsgId = static_cast<std::string*>(msg->getContextPointer());
-    if (!pMsgId) {
-        delete msg;
+    auto* timer = check_and_cast<RebroadcastTimer*>(message);
+    const auto id = timer->id; // copy before any cleanup can delete this timer
+    const auto found = mRebroadcastStates.find(id);
+    if (found == mRebroadcastStates.end()) { delete timer; return; }
+    auto& state = found->second;
+    if (simTime() >= state.expirationTime || !submitForwarded(state)) {
+        discardForwarding(id);
         return;
     }
-    std::string msgId = *pMsgId;
-    auto it = mRebroadcastStates.find(msgId);
-    if (it == mRebroadcastStates.end()) {
-        delete pMsgId;
-        delete msg;
-        return;
-    }
-    
-    RebroadcastState& state = it->second;
-
+    SimTime next;
     if (state.phase == RebroadcastPhase::WAITING_T) {
-        // T expired. Rebroadcast down to BTP.
-        using namespace vanetza;
-        btp::DataRequestB request;
-        request.destination_port = btp::ports::CPM;
-        request.gn.its_aid = aid::CP;
-        request.gn.transport_type = geonet::TransportType::SHB;
-        request.gn.maximum_lifetime = geonet::Lifetime{geonet::Lifetime::Base::One_Second, 1};
-        request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
-        request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
-
-        CpObject obj(state.cpm);
-        emit(scSignalCpmSent, &obj);
-
-        using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
-        std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
-        std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(state.cpm)};
-        payload->layer(OsiLayer::Application) = std::move(buffer);
-        this->request(request, std::move(payload));
-
         state.phase = RebroadcastPhase::WAITING_T1;
-        scheduleAt(simTime() + par("t1Max").doubleValue(), msg);
-    } else if (state.phase == RebroadcastPhase::WAITING_T1) {
-        // T1 expired, start SCF (periodic rebroadcast)
+        // Deliberately retain application-submission timing under DCC.
+        next = simTime() + mForwardT1;
+    } else {
+        // T1 expiry sends the first SCF copy immediately, then repeats at T2.
         state.phase = RebroadcastPhase::SCF_REBROADCAST;
-        scheduleAt(simTime() + par("t2").doubleValue(), msg);
-    } else if (state.phase == RebroadcastPhase::SCF_REBROADCAST) {
-        if (simTime() > state.expirationTime) {
-            // T3 (message lifetime) exceeded, remove state
-            delete pMsgId;
-            delete msg;
-            mRebroadcastStates.erase(it);
-            return;
-        }
-
-        using namespace vanetza;
-        btp::DataRequestB request;
-        request.destination_port = btp::ports::CPM;
-        request.gn.its_aid = aid::CP;
-        request.gn.transport_type = geonet::TransportType::SHB;
-        request.gn.maximum_lifetime = geonet::Lifetime{geonet::Lifetime::Base::One_Second, 1};
-        request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
-        request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
-
-        CpObject obj(state.cpm);
-        emit(scSignalCpmSent, &obj);
-
-        using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
-        std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
-        std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(state.cpm)};
-        payload->layer(OsiLayer::Application) = std::move(buffer);
-        this->request(request, std::move(payload));
-
-        scheduleAt(simTime() + par("t2").doubleValue(), msg);
+        next = simTime() + mForwardT2;
     }
+    scheduleAt(std::min(next, state.expirationTime), timer);
 }
 
 void CpServiceVPCast::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details)
@@ -1747,7 +1825,7 @@ void CpServiceVPCast::updatePerceptionRate()
     auto globalEnv = mLocalEnvironmentModel->getGlobalEnvironmentModel();
     if (!globalEnv) return;
 
-    if (mVdpSnapshot.referenceLatitude == 0) {
+    if (!mVdpSnapshotValid) {
         captureVdpSnapshot();
     }
     Position egoPos;

@@ -1,6 +1,7 @@
 package artery.inet;
 
 import artery.StaticNodeManager;
+import artery.application.CpmObjectFreshnessObserver;
 import artery.storyboard.Storyboard;
 import inet.environment.contract.IPhysicalEnvironment;
 import inet.physicallayer.contract.packetlevel.IRadioMedium;
@@ -11,6 +12,8 @@ network World
     parameters:
         bool withStoryboard = default(false);
         bool withPhysicalEnvironment = default(false);
+        bool withCpmLinkPrr = default(false);
+        bool withCpmObjectFreshness = default(false);
         int numRoadSideUnits = default(0);
         traci.mapper.personType = default("artery.inet.Person");
         traci.mapper.vehicleType = default("artery.inet.Car");
@@ -23,6 +26,9 @@ network World
         double probeInterval @unit(m) = default(25m);
 
     submodules:
+        cpmLinkPrr: CpmLinkPrrObserver if withCpmLinkPrr;
+        cpmObjectFreshness: CpmObjectFreshnessObserver if withCpmObjectFreshness;
+
         traci: Manager {
             parameters:
                 @display("p=20,20");

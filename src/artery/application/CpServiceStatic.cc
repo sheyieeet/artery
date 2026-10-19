@@ -45,10 +45,8 @@ using namespace omnetpp;
 
 static const simsignal_t scSignalCpmReceived = cComponent::registerSignal("CpmReceived");
 static const simsignal_t scSignalCpmSent = cComponent::registerSignal("CpmSent");
-static const simsignal_t scSignalCpmTxThroughput = cComponent::registerSignal("CpmTxThroughput");
 static const simsignal_t scSignalCpmRxThroughput = cComponent::registerSignal("CpmRxThroughput");
 static const simsignal_t scSignalCpmChannelLoad = cComponent::registerSignal("CpmChannelLoad");
-static const simsignal_t scSignalCpmTxObjectCount = cComponent::registerSignal("CpmTxObjectCount");
 static const simsignal_t scSignalCpmRxObjectCount = cComponent::registerSignal("CpmRxObjectCount");
 static const simsignal_t scSignalCpmObjectUpdateInterval = cComponent::registerSignal("CpmObjectUpdateInterval");
 
@@ -169,7 +167,7 @@ CpServiceStatic::~CpServiceStatic()
 
 void CpServiceStatic::initialize()
 {
-    ItsG5BaseService::initialize();
+    CpmService::initialize();
     mNetworkInterfaceTable = getFacilities().get_const_ptr<NetworkInterfaceTable>();
     mVehicleDataProvider = getFacilities().get_const_ptr<VehicleDataProvider>();
     mIdentity = getFacilities().get_const_ptr<Identity>();
@@ -231,7 +229,6 @@ void CpServiceStatic::initialize()
         scSignalPerceptionRate[i] = cComponent::registerSignal(signalName.c_str());
     }
     scSignalCpmExpectedDistance = registerSignal("cpmExpectedDistance");
-    scSignalCpmPacketSize = registerSignal("cpmPacketSize");
     scSignalCpmReceivedDistance = registerSignal("cpmReceivedDistance");
 
     // look up primary channel for CP
@@ -240,8 +237,6 @@ void CpServiceStatic::initialize()
     const auto stationType = mVehicleDataProvider ? mVehicleDataProvider->getStationType() : vanetza::geonet::StationType::RSU;
 
     // Initialize custom metrics tracking fields
-    mLastTxThroughputTime = simTime();
-    mAccumulatedTxBytes = 0;
     mLastRxThroughputTime = simTime();
     mAccumulatedRxBytes = 0;
     mLastChannelLoad = 0.0;
@@ -265,6 +260,7 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
     // receive CPM
     if (cpm && cpm->validate()) {
         CpObject obj = visitor.shared_wrapper; 
+        observeCpmObjectFreshness(this, obj);
 
         // Log received CPM metrics
         size_t numRxObjects = 0;
@@ -275,7 +271,7 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
         const Vanetza_ITS2_CPM_PDU_Descriptions_ManagementContainer_t& mc = (**cpm).payload.managementContainer;
         double senderLat = static_cast<double>(mc.referencePosition.latitude);
         double senderLon = static_cast<double>(mc.referencePosition.longitude);
-        if (mVdpSnapshot.referenceLatitude == 0) {
+        if (!mVdpSnapshotValid) {
             captureVdpSnapshot();
         }
         double receiverLat = static_cast<double>(mVdpSnapshot.referenceLatitude);
@@ -431,6 +427,7 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
                     } 
                     
                     RsuTrackedObstacle newObs;
+                    newObs.provenance = lookupCpmObjectProvenance(obj.shared_ptr(), po);
                     newObs.speed = obsSpeed;
                     newObs.heading = obsHeading;
 
@@ -493,6 +490,7 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
                         mGlobalObstaclesList[objId].lastUpdateTime = t_now;
                         mGlobalObstaclesList[objId].speed = obsSpeed;
                         mGlobalObstaclesList[objId].heading = obsHeading;
+                        mGlobalObstaclesList[objId].provenance = newObs.provenance;
                     }
                 }
             }
@@ -512,6 +510,7 @@ void CpServiceStatic::indicate(const vanetza::btp::DataIndication& ind, std::uni
                         it1->second.x = it2->second.x;
                         it1->second.y = it2->second.y;
                         it1->second.lastUpdateTime = it2->second.lastUpdateTime;
+                        it1->second.provenance = it2->second.provenance;
                     }
                     it2 = mGlobalObstaclesList.erase(it2); 
                 } else {
@@ -558,6 +557,8 @@ void CpServiceStatic::handleMessage(omnetpp::cMessage* msg)
             sendCpm(simTime());
         }
         scheduleAt(simTime() + omnetpp::SimTime(0.1), cpmTimer);
+    } else {
+        CpmService::handleMessage(msg);
     }
 }
 
@@ -630,43 +631,14 @@ void CpServiceStatic::sendCpm(const SimTime& T_now)
     request.gn.traffic_class.tc_id(static_cast<unsigned>(dcc::Profile::DP2));
     request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
     CpObject obj(std::move(cpm));
+    if (includeObjects) attachCpmObjectProvenance(obj.shared_ptr(), mPerceivedObjectSnapshot, mSelectedCpmObjects);
     emit(scSignalCpmSent, &obj);
-
-    // Estimate size of CPM safely
-    size_t txSize = 22; // Header + Management Container
-    if (mVdpSnapshot.stationType == static_cast<int>(vanetza::geonet::StationType::RSU)) {
-        txSize += 4;
-    } else {
-        txSize += 35;
-    }
-    if (checkSensorInformationTrigger(T_now)) {
-        txSize += 10 + 20 * mSensorSnapshot.size();
-    }
-    if (includeObjects) {
-        txSize += 5 + 35 * mSelectedCpmObjects.size();
-    }
 
     using CpmByteBuffer = convertible::byte_buffer_impl<Cpm>;
     std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
     std::unique_ptr<convertible::byte_buffer> buffer{new CpmByteBuffer(obj.shared_ptr())};
     payload->layer(OsiLayer::Application) = std::move(buffer);
     this->request(request, std::move(payload));
-
-    // Log TX CPM metrics
-    emit(scSignalCpmPacketSize, (long)txSize);
-    mAccumulatedTxBytes += txSize;
-    double txInterval = (T_now - mLastTxThroughputTime).dbl();
-    if (txInterval >= 1.0) {
-        double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
-        emit(scSignalCpmTxThroughput, txThroughput);
-        writeMetricToCsv("TX_Throughput", txThroughput);
-        mLastTxThroughputTime = T_now;
-        mAccumulatedTxBytes = 0;
-    }
-
-    size_t numTxObjects = includeObjects ? mSelectedCpmObjects.size() : 0;
-    emit(scSignalCpmTxObjectCount, (long)numTxObjects);
-    writeMetricToCsv("TX_ObjectCount", numTxObjects);
 
     if (mLocalEnvironmentModel && mLocalEnvironmentModel->getGlobalEnvironmentModel()) {
         auto allObjects = mLocalEnvironmentModel->getGlobalEnvironmentModel()->getAllObjects();
@@ -784,6 +756,7 @@ void CpServiceStatic::sendSelectedLink(uint32_t targetVehicleId, const vanetza::
         const auto& target = pair.second;
         CpServiceStatic::PerceivedObjectSnapshot snap;
         snap.cpsId = target.id;
+        snap.provenance = target.provenance;
         
         double relToRsuX = target.x - rsuGlobalX;
         double relToRsuY = target.y - rsuGlobalY;
@@ -801,6 +774,9 @@ void CpServiceStatic::sendSelectedLink(uint32_t targetVehicleId, const vanetza::
     // geounicast
 // V2X Transmission (Fallback to SHB)
     if (!selectedSnapshots.empty()) {
+        if (!mVdpSnapshotValid) {
+            captureVdpSnapshot();
+        }
         Cpm responseCpm = createCollectivePerceptionMessage(mVdpSnapshot, countTaiMilliseconds(mTimer->getTimeFor(t_now)));
         addOriginatingRsuContainerStatic(responseCpm);
         addPerceivedObjectContainer(responseCpm, selectedSnapshots, selectedIndices, mLastCpmTimestamp);
@@ -816,34 +792,14 @@ void CpServiceStatic::sendSelectedLink(uint32_t targetVehicleId, const vanetza::
         request.gn.communication_profile = geonet::CommunicationProfile::ITS_G5;
 
         CpObject obj(std::move(responseCpm));
+        attachCpmObjectProvenance(obj.shared_ptr(), selectedSnapshots, selectedIndices);
         emit(scSignalCpmSent, &obj);
-
-        // Estimate size of CPM safely (RSU selected link does not contain sensor info container)
-        size_t txSize = 22 + 4; // Header + Management Container + RSU Container
-        if (!selectedSnapshots.empty()) {
-            txSize += 5 + 35 * selectedSnapshots.size();
-        }
 
         std::unique_ptr<geonet::DownPacket> payload{new geonet::DownPacket()};
         std::unique_ptr<convertible::byte_buffer> buffer{new convertible::byte_buffer_impl<Cpm>(obj.shared_ptr())};
         payload->layer(OsiLayer::Application) = std::move(buffer);
         this->request(request, std::move(payload));
 
-        // Log TX CPM metrics
-        emit(scSignalCpmPacketSize, (long)txSize);
-        mAccumulatedTxBytes += txSize;
-        double txInterval = (t_now - mLastTxThroughputTime).dbl();
-        if (txInterval >= 1.0) {
-            double txThroughput = (mAccumulatedTxBytes * 8.0) / txInterval; // bits per second
-            emit(scSignalCpmTxThroughput, txThroughput);
-            writeMetricToCsv("TX_Throughput", txThroughput);
-            mLastTxThroughputTime = t_now;
-            mAccumulatedTxBytes = 0;
-        }
-
-        size_t numTxObjects = selectedSnapshots.size();
-        emit(scSignalCpmTxObjectCount, (long)numTxObjects);
-        writeMetricToCsv("TX_ObjectCount", numTxObjects);
     }
 }
 
@@ -901,6 +857,7 @@ void CpServiceStatic::captureVdpSnapshot()
     if (mVdpSnapshot.referenceLongitude < -1800000000 || mVdpSnapshot.referenceLongitude > 1800000000) {
         mVdpSnapshot.referenceLongitude = 1800000001; // unavailable
     }
+    mVdpSnapshotValid = true;
 }
 
 void CpServiceStatic::captureSensorSnapshot(const omnetpp::SimTime& T_now, const std::vector<Sensor*>& sensors)
@@ -1016,6 +973,8 @@ void CpServiceStatic::capturePerceivedObjectSnapshot(
                 lastDetected = trackingTime.last();
             }
         }
+        // Use the original sensor observation time, independent of wire delta sign/clamping.
+        snap.provenance = CpmObjectProvenance{objPtr, lastDetected, !tracking.sensors().empty()};
         int64_t lastDetectedTaiMs = countTaiMilliseconds(mTimer->getTimeFor(lastDetected));
         int64_t deltaTime = referenceTime - lastDetectedTaiMs;
         deltaTime = std::clamp(deltaTime, int64_t(-2048), int64_t(2047));
@@ -1573,7 +1532,7 @@ void CpServiceStatic::finish()
     if (findHost()) {
         findHost()->unsubscribe(RadioDriverBase::ChannelLoadSignal, this);
     }
-    ItsG5BaseService::finish();
+    CpmService::finish();
 }
 
 void CpServiceStatic::receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details)
@@ -1644,7 +1603,7 @@ void CpServiceStatic::updatePerceptionRate()
     auto globalEnv = mLocalEnvironmentModel->getGlobalEnvironmentModel();
     if (!globalEnv) return;
 
-    if (mVdpSnapshot.referenceLatitude == 0) {
+    if (!mVdpSnapshotValid) {
         captureVdpSnapshot();
     }
     Position egoPos;

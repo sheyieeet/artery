@@ -6,7 +6,8 @@
 #ifndef ARTERY_CPSERVICE_H_
 #define ARTERY_CPSERVICE_H_
 
-#include "artery/application/ItsG5BaseService.h"
+#include "artery/application/CpmService.h"
+#include "artery/application/CpmObjectProvenance.h"
 #include "artery/envmod/LocalEnvironmentModel.h"
 #include "artery/utility/Channel.h"
 #include "artery/utility/Geometry.h"
@@ -18,6 +19,9 @@
 #include <vanetza/units/velocity.hpp>
 
 #include <cstdint>
+#include <array>
+#include <map>
+#include <tuple>
 #include <limits>
 #include <optional>
 #include <unordered_map>
@@ -33,17 +37,17 @@ class NetworkInterfaceTable;
 class Timer;
 class VehicleDataProvider;
 
-class CpServiceVPCast : public ItsG5BaseService
+class CpServiceVPCast : public CpmService
 {
 public:
     struct VdpSnapshot {
-        omnetpp::SimTime updated;
-        uint32_t stationId;
-        int stationType;  // vanetza::geonet::StationType as int
-        Position position;
-        long referenceLatitude;        // same encoding as mc.referencePosition.latitude
-        long referenceLongitude;       // same encoding as mc.referencePosition.longitude
-        long orientationAngleDeciDeg;  // same encoding as ovc.orientationAngle.value
+        omnetpp::SimTime updated = omnetpp::SimTime::ZERO;
+        uint32_t stationId = 0;
+        int stationType = static_cast<int>(vanetza::geonet::StationType::Unknown);
+        Position position{0.0, 0.0};
+        long referenceLatitude = 900000001;   // unavailable
+        long referenceLongitude = 1800000001; // unavailable
+        long orientationAngleDeciDeg = 36001; // unavailable
     };
 
     struct SensorSnapshot {
@@ -65,6 +69,7 @@ public:
     enum class PerceivedObjectType : std::uint8_t { Unknown = 0, TypeA, TypeB };
 
     struct PerceivedObjectSnapshot {
+        CpmObjectProvenance provenance; // measurement only; never encoded
         uint32_t lemId = 0;
         uint16_t cpsId = 0;
 
@@ -111,15 +116,22 @@ public:
 
     enum class RebroadcastPhase { WAITING_T, WAITING_T1, SCF_REBROADCAST };
 
+    // The digest distinguishes different CPMs with the same measurement time.
+    // Radio/GN headers are excluded so this identity survives rebroadcasts.
+    using MessageId = std::tuple<uint32_t, uint64_t, std::array<uint8_t, 32>>;
+    class RebroadcastTimer;
+
     struct RebroadcastState {
-        std::string msgId;
         std::shared_ptr<const Cpm> cpm;
         RebroadcastPhase phase = RebroadcastPhase::WAITING_T;
         omnetpp::SimTime expirationTime;
-        omnetpp::cMessage* timerMsg = nullptr;
+        RebroadcastTimer* timerMsg = nullptr;
     };
 
-    std::unordered_map<std::string, RebroadcastState> mRebroadcastStates;
+    std::map<MessageId, RebroadcastState> mRebroadcastStates;
+    std::map<MessageId, omnetpp::SimTime> mSeenMessages;
+    std::multimap<omnetpp::SimTime, MessageId> mSeenExpiry;
+    omnetpp::cMessage* mForwardingExpiryTimer = nullptr;
     void handleRebroadcastTimer(omnetpp::cMessage* msg);
     std::map<uint32_t, uint64_t> mLatestSeenRefTime;
 
@@ -130,14 +142,39 @@ public:
     ~CpServiceVPCast() override;
     void initialize() override;
     void finish() override;
-    void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>) override;
+    void indicate(const vanetza::btp::DataIndication&, std::unique_ptr<vanetza::UpPacket>, const NetworkInterface&) override;
     void trigger() override;
     void receiveSignal(omnetpp::cComponent* source, omnetpp::simsignal_t signal, double value, omnetpp::cObject* details) override;
     void handleMessage(omnetpp::cMessage* msg) override;
 
 private:
 
+    void initializeForwarding();
+    void processForwarding(const vanetza::btp::DataIndication&, std::shared_ptr<const Cpm>, const NetworkInterface&);
+    static MessageId identifyMessage(const Cpm&);
+    void rememberOriginated(const Cpm&);
+    omnetpp::SimTime messageDeadline(const MessageId&) const;
+    void rememberMessage(const MessageId&, const omnetpp::SimTime&);
+    void expireForwarding();
+    void discardForwarding(const MessageId&);
+    void clearForwarding();
+    bool submitForwarded(const RebroadcastState&);
+    static double forwardingWait(double senderSpeed, double receiverSpeed, double distance,
+        double maxSpeed, double range, double slots, double slotDuration);
+    static bool isBehind(double east, double north, double headingRadians);
+
+    omnetpp::SimTime mForwardT1;
+    omnetpp::SimTime mForwardT2;
+    omnetpp::SimTime mForwardT3;
+    omnetpp::SimTime mSlotDuration;
+    double mForwardRange = 0.0;
+    double mForwardMaxSpeed = 0.0;
+    double mForwardSlots = 0.0;
+    bool mForwardingFinished = false;
+    omnetpp::cModule* mChannelLoadHost = nullptr;
+
 	struct RsuTrackedObstacle {
+        CpmObjectProvenance provenance; // follows cached state; not serialized
 		 long id;                        
 		 double x;                       
 		 double y;
@@ -177,7 +214,8 @@ private:
     const Timer* mTimer = nullptr;
     LocalDynamicMap* mLocalDynamicMap = nullptr;
     LocalEnvironmentModel* mLocalEnvironmentModel = nullptr;
-    VdpSnapshot mVdpSnapshot;
+    VdpSnapshot mVdpSnapshot{};
+    bool mVdpSnapshotValid = false; // coordinates (including zero) are not validity sentinels
 
     omnetpp::SimTime mGenCpmMin;
     omnetpp::SimTime mGenCpmMax;
@@ -221,8 +259,6 @@ private:
     std::vector<SensorSnapshot> mSensorSnapshot;
 
     // Custom metrics logging fields & helpers
-    omnetpp::SimTime mLastTxThroughputTime = omnetpp::SimTime::ZERO;
-    size_t mAccumulatedTxBytes = 0;
     omnetpp::SimTime mLastRxThroughputTime = omnetpp::SimTime::ZERO;
     size_t mAccumulatedRxBytes = 0;
     double mLastChannelLoad = 0.0;
@@ -237,8 +273,7 @@ private:
     void updatePerceptionRate();
     omnetpp::simsignal_t scSignalCpmExpectedDistance;
     omnetpp::simsignal_t scSignalCpmReceivedDistance;
-    omnetpp::simsignal_t scSignalCpmPacketSize;
-    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0);
+    void writeMetricToCsv(const std::string& metricType, double value, long objectId = 0) override;
 };
 
 Cpm createCollectivePerceptionMessage(const CpServiceVPCast::VdpSnapshot& vdp, uint64_t referenceTime);

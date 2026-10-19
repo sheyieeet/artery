@@ -6,7 +6,8 @@
 #ifndef ARTERY_CPSERVICE_H_
 #define ARTERY_CPSERVICE_H_
 
-#include "artery/application/ItsG5BaseService.h"
+#include "artery/application/CpmService.h"
+#include "artery/application/CpmObjectProvenance.h"
 #include "artery/envmod/LocalEnvironmentModel.h"
 #include "artery/utility/Channel.h"
 #include "artery/utility/Geometry.h"
@@ -33,17 +34,17 @@ class NetworkInterfaceTable;
 class Timer;
 class VehicleDataProvider;
 
-class CpService : public ItsG5BaseService
+class CpService : public CpmService
 {
 public:
     struct VdpSnapshot {
-        omnetpp::SimTime updated;
-        uint32_t stationId;
-        int stationType;  // vanetza::geonet::StationType as int
-        Position position;
-        long referenceLatitude;        // same encoding as mc.referencePosition.latitude
-        long referenceLongitude;       // same encoding as mc.referencePosition.longitude
-        long orientationAngleDeciDeg;  // same encoding as ovc.orientationAngle.value
+        omnetpp::SimTime updated = omnetpp::SimTime::ZERO;
+        uint32_t stationId = 0;
+        int stationType = static_cast<int>(vanetza::geonet::StationType::Unknown);
+        Position position{0.0, 0.0};
+        long referenceLatitude = 900000001;   // unavailable
+        long referenceLongitude = 1800000001; // unavailable
+        long orientationAngleDeciDeg = 36001; // unavailable
     };
 
     struct SensorSnapshot {
@@ -65,6 +66,7 @@ public:
     enum class PerceivedObjectType : std::uint8_t { Unknown = 0, TypeA, TypeB };
 
     struct PerceivedObjectSnapshot {
+        CpmObjectProvenance provenance; // measurement only; never encoded
         uint32_t lemId = 0;
         uint16_t cpsId = 0;
 
@@ -142,12 +144,15 @@ private:
     const Timer* mTimer = nullptr;
     LocalDynamicMap* mLocalDynamicMap = nullptr;
     LocalEnvironmentModel* mLocalEnvironmentModel = nullptr;
-    VdpSnapshot mVdpSnapshot;
+    VdpSnapshot mVdpSnapshot{};
+    bool mVdpSnapshotValid = false; // coordinates (including zero) are not validity sentinels
 
     omnetpp::SimTime mGenCpmMin;
     omnetpp::SimTime mGenCpmMax;
     omnetpp::SimTime mGenCpm;
     omnetpp::SimTime mLastCpmTimestamp;
+    omnetpp::SimTime mLastCpmDecisionTimestamp;
+    bool mUseProposedGenerationRules = false;
     bool mDccRestriction;
     omnetpp::SimTime mAddSensorInformation;
     omnetpp::SimTime mLastSensorInformationTimestamp;
@@ -193,8 +198,6 @@ private:
     std::vector<SensorSnapshot> mSensorSnapshot;
 
     // Custom metrics logging fields
-    omnetpp::SimTime mLastTxThroughputTime = omnetpp::SimTime::ZERO;
-    size_t mAccumulatedTxBytes = 0;
     omnetpp::SimTime mLastRxThroughputTime = omnetpp::SimTime::ZERO;
     size_t mAccumulatedRxBytes = 0;
     double mLastChannelLoad = 0.0;
@@ -209,7 +212,6 @@ private:
     void updatePerceptionRate();
     omnetpp::simsignal_t scSignalCpmExpectedDistance;
     omnetpp::simsignal_t scSignalCpmReceivedDistance;
-    omnetpp::simsignal_t scSignalCpmPacketSize;
 };
 
 Cpm createCollectivePerceptionMessage(const CpService::VdpSnapshot& vdp, uint64_t referenceTime);

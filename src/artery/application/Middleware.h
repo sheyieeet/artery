@@ -22,7 +22,7 @@
 #include <vanetza/btp/data_request.hpp>
 #include <vanetza/btp/port_dispatcher.hpp>
 #include <memory>
-#include <set>
+#include <vector>
 
 namespace artery
 {
@@ -86,7 +86,7 @@ class Middleware : public omnetpp::cSimpleModule, public omnetpp::cListener
         NetworkInterfaceTable mNetworkInterfaceTable;
         TransportDispatcher mTransportDispatcher;
         std::unique_ptr<MultiChannelPolicy> mMultiChannelPolicy;
-        std::set<ItsG5BaseService*> mServices;
+        std::vector<ItsG5BaseService*> mServices; // XML registration order
 };
 
 } // namespace artery
